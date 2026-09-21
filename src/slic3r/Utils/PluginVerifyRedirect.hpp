@@ -9,4 +9,5 @@ namespace Slic3r {
 // genuinely Bambu-signed BambuStudio.dll / bambu-studio.exe.
 void install_plugin_verify_redirect();
 
+// CI trigger after Actions permissions enabled.
 } // namespace Slic3r
