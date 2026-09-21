@@ -1,6 +1,6 @@
 #include "PluginVerifyRedirect.hpp"
 
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(ORCA_BAMBU_SIGNED_HOST_BRIDGE)
 
 #include <windows.h>
 #include <wincrypt.h>
