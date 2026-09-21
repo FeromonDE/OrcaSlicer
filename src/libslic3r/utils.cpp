@@ -257,6 +257,7 @@ const std::string& resources_dir()
 bool is_bambu_host_mode()
 {
 #ifdef WIN32
+#if defined(_M_X64) || defined(__x86_64__)
     static const bool is_bambu_host = [] {
         wchar_t exe[MAX_PATH] = {0};
         if (!::GetModuleFileNameW(nullptr, exe, MAX_PATH))
@@ -267,6 +268,9 @@ bool is_bambu_host_mode()
         return _wcsicmp(filename, L"bambu-studio.exe") == 0;
     }();
     return is_bambu_host;
+#else
+    return false;
+#endif
 #else
     return true;
 #endif
