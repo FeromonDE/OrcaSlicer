@@ -475,6 +475,7 @@ int wmain(int argc, wchar_t **argv)
     _wsplitpath(path_to_exe, drive, dir, fname, ext);
     _wmakepath(path_to_exe, drive, dir, nullptr, nullptr);
 
+#if defined(_M_X64) || defined(__x86_64__)
     if (stage_bambu_host_only) {
         const BambuHostStageResult staged = stage_current_bambu_host(path_to_exe);
         return staged == BambuHostStageResult::Ready ? 0 : 1;
@@ -496,6 +497,10 @@ int wmain(int argc, wchar_t **argv)
             return 0;
         }
     }
+#else
+    if (stage_bambu_host_only)
+        return 1;
+#endif
 
     wchar_t path_to_python[MAX_PATH + 1] = { 0 };
     wcscpy(path_to_python, path_to_exe);
