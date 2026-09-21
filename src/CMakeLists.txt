@@ -229,7 +229,7 @@ if (WIN32)
         OUTPUT_NAME "orca-slicer"
         WIN32_EXECUTABLE "$<NOT:$<CONFIG:RelWithDebInfo>>"
     )
-    target_link_libraries(OrcaSlicer_app_gui PRIVATE boost_headeronly)
+    target_link_libraries(OrcaSlicer_app_gui PRIVATE boost_headeronly Advapi32 Shell32 User32)
 endif ()
 
 # Link the resources dir to where Slic3r GUI expects it
