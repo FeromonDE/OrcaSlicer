@@ -752,6 +752,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BBLPrinterAgent.hpp
     Utils/BBLNetworkPlugin.cpp
     Utils/BBLNetworkPlugin.hpp
+    Utils/PluginVerifyRedirect.cpp
+    Utils/PluginVerifyRedirect.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
@@ -879,6 +881,18 @@ target_include_directories(libslic3r_gui PRIVATE Utils ${CMAKE_CURRENT_BINARY_DI
 if (WIN32)
     target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)
     target_link_libraries(libslic3r_gui Advapi32)
+
+    # Bambu's proprietary network plugin verifies the studio host before allowing
+    # protected commands. MinHook is used by PluginVerifyRedirect.cpp to redirect
+    # only those verification queries to the installed, genuine Bambu Studio files.
+    include(FetchContent)
+    FetchContent_Declare(minhook
+        GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+        GIT_TAG 8af6b4acae5a9388fd742b56fa79ece89d96f823
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(minhook)
+    target_link_libraries(libslic3r_gui minhook)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
