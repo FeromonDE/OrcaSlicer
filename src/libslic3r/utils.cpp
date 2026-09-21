@@ -254,6 +254,24 @@ const std::string& resources_dir()
     return g_resources_dir;
 }
 
+bool is_bambu_host_mode()
+{
+#ifdef WIN32
+    static const bool is_bambu_host = [] {
+        wchar_t exe[MAX_PATH] = {0};
+        if (!::GetModuleFileNameW(nullptr, exe, MAX_PATH))
+            return false;
+
+        const wchar_t* filename = wcsrchr(exe, L'\\');
+        filename = filename ? filename + 1 : exe;
+        return _wcsicmp(filename, L"bambu-studio.exe") == 0;
+    }();
+    return is_bambu_host;
+#else
+    return true;
+#endif
+}
+
 //BBS: add temporary dir
 static std::string g_temporary_dir;
 void set_temporary_dir(const std::string &dir)
