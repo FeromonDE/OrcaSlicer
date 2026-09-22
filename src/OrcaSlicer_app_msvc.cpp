@@ -334,6 +334,25 @@ static bool launch_bambu_host(const wchar_t* orca_dir, int argc, wchar_t** argv)
     std::vector<wchar_t> command_buffer(command.begin(), command.end());
     command_buffer.push_back(L'\0');
 
+    // The genuine Bambu launcher loads our BambuStudio.dll directly and does not
+    // add Orca's bundled Python directory to the DLL search path. Prepend it to
+    // PATH for the child so transitive imports such as python312.dll can resolve.
+    DWORD path_size = ::GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    std::wstring original_path;
+    if (path_size > 0) {
+        std::vector<wchar_t> path_buffer(path_size);
+        if (::GetEnvironmentVariableW(L"PATH", path_buffer.data(), path_size) > 0)
+            original_path.assign(path_buffer.data());
+    }
+
+    std::wstring child_path = orca_dir;
+    child_path += L"python";
+    if (!original_path.empty()) {
+        child_path += L";";
+        child_path += original_path;
+    }
+    ::SetEnvironmentVariableW(L"PATH", child_path.c_str());
+
     PROCESS_INFORMATION process = {};
     BOOL launched = FALSE;
 
@@ -399,6 +418,13 @@ static bool launch_bambu_host(const wchar_t* orca_dir, int argc, wchar_t** argv)
             &startup,
             &process);
     }
+
+    // Restore Orca's own environment after CreateProcess; the child already
+    // received its private copy.
+    if (path_size > 0)
+        ::SetEnvironmentVariableW(L"PATH", original_path.c_str());
+    else
+        ::SetEnvironmentVariableW(L"PATH", nullptr);
 
     if (!launched)
         return false;
