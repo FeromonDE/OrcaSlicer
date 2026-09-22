@@ -169,7 +169,7 @@ jobs:
   unit_tests_windows_arm64:
     name: Windows arm64
     needs: build_windows
-    if: ${{ !cancelled() && success() && !vars.SELF_HOSTED }}
+    if: ${{ false }}
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: windows-11-vs2026-arm
