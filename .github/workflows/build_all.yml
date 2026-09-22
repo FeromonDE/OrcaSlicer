@@ -102,7 +102,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(vars.SELF_HOSTED
           && '[{"arch":"x64","os":"orca-win-server","compiler":"clang"}]'
-          || '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]') }}
+          || (github.head_ref == 'bambu-signed-host' || github.ref == 'refs/heads/bambu-signed-host'
+              ? '[{"arch":"x64","os":"windows-latest","compiler":"clang"}]'
+              : '[{"arch":"x64","os":"windows-latest","compiler":"clang"},{"arch":"arm64","os":"windows-11-vs2026-arm","compiler":"clang"}]')) }}
     needs: check_build_script
     # Don't run scheduled builds on forks:
     if: ${{ !cancelled() && needs.check_build_script.result == 'success' && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
@@ -133,7 +135,7 @@ jobs:
   build_macos_universal:
     name: Build macOS Universal
     needs: build_macos_arch
-    if: ${{ !cancelled() && needs.build_macos_arch.result == 'success' && !inputs.build-deps-only && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && github.head_ref != 'bambu-signed-host' && github.ref != 'refs/heads/bambu-signed-host' && needs.build_macos_arch.result == 'success' && !inputs.build-deps-only && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_orca.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-14' }}
@@ -251,7 +253,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     # Don't run scheduled builds on forks; skip entirely on self-hosted runners
-    if: ${{ !cancelled() && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
+    if: ${{ !cancelled() && github.head_ref != 'bambu-signed-host' && github.ref != 'refs/heads/bambu-signed-host' && !vars.SELF_HOSTED && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
 
     runs-on: ${{ matrix.variant.runner }}
     env:
