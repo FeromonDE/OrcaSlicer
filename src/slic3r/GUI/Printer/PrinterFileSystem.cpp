@@ -991,6 +991,8 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
 {
     json req;
     json arr;
+    if (!m_file_storage.empty())
+        req["storage"] = m_file_storage;
     if (type == OldThumbnail) {
         for (auto &file : *files) arr.push_back(file.name);
         req["files"] = arr;
@@ -1038,8 +1040,17 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         }
         req["paths"] = arr;
     }
+    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE request type=" << type
+                            << " storage=" << m_file_storage
+                            << " req=" << req.dump();
+
     SendRequest<File>(
         SUB_FILE, req, [type, files](json const &resp, File &file, unsigned char const *data) -> int {
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE response type=" << type
+                                    << " path=" << resp.value("path", "")
+                                    << " thumbnail=" << resp.value("thumbnail", "")
+                                    << " size=" << resp.value("size", 0)
+                                    << " continue=" << resp.value("continue", false);
             // in work thread, continue recv
             // receive data
             wxString        mimetype  = resp.value("mimetype", "");
@@ -1093,6 +1104,10 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             return 0;
         },
         [this, files, type](int result, File const &file) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE callback type=" << type
+                                    << " result=" << result
+                                    << " file=" << file.name
+                                    << " path=" << file.path;
             auto n    = file.name.find_last_of('.');
             auto name  = n == std::string::npos ? file.name : file.name.substr(0, n) + ".mp4";
             n          = (type == ModelMetadata) ? std::string::npos : file.path.find_last_of('#');
