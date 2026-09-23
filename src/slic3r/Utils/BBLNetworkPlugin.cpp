@@ -635,6 +635,63 @@ PrintParams_0203 BBLNetworkPlugin::as_0203(PrintParams& param)
     return p;
 }
 
+
+// 02.08.02 is layout-compatible with 02.08.01 through slicer_uid and appends
+// queue_plate_id. Orca does not use print-queue plates yet, so leave it empty.
+PrintParams_020802 BBLNetworkPlugin::as_020802(PrintParams& param)
+{
+    PrintParams_020802 p;
+
+    p.dev_id                       = std::move(param.dev_id);
+    p.task_name                    = std::move(param.task_name);
+    p.project_name                 = std::move(param.project_name);
+    p.preset_name                  = std::move(param.preset_name);
+    p.filename                     = std::move(param.filename);
+    p.config_filename              = std::move(param.config_filename);
+    p.plate_index                  = param.plate_index;
+    p.ftp_folder                   = std::move(param.ftp_folder);
+    p.ftp_file                     = std::move(param.ftp_file);
+    p.ftp_file_md5                 = std::move(param.ftp_file_md5);
+    p.nozzle_mapping               = std::move(param.nozzle_mapping);
+    p.ams_mapping                  = std::move(param.ams_mapping);
+    p.ams_mapping2                 = std::move(param.ams_mapping2);
+    p.ams_mapping_info             = std::move(param.ams_mapping_info);
+    p.nozzles_info                 = std::move(param.nozzles_info);
+    p.connection_type              = std::move(param.connection_type);
+    p.comments                     = std::move(param.comments);
+    p.origin_profile_id            = param.origin_profile_id;
+    p.stl_design_id                = param.stl_design_id;
+    p.origin_model_id              = std::move(param.origin_model_id);
+    p.print_type                   = std::move(param.print_type);
+    p.dst_file                     = std::move(param.dst_file);
+    p.dev_name                     = std::move(param.dev_name);
+    p.dev_ip                       = std::move(param.dev_ip);
+    p.use_ssl_for_ftp              = param.use_ssl_for_ftp;
+    p.use_ssl_for_mqtt             = param.use_ssl_for_mqtt;
+    p.username                     = std::move(param.username);
+    p.password                     = std::move(param.password);
+    p.task_bed_leveling            = param.task_bed_leveling;
+    p.task_flow_cali               = param.task_flow_cali;
+    p.task_vibration_cali          = param.task_vibration_cali;
+    p.task_layer_inspect           = param.task_layer_inspect;
+    p.task_record_timelapse        = param.task_record_timelapse;
+    p.task_timelapse_use_internal  = param.task_timelapse_use_internal;
+    p.task_use_ams                 = param.task_use_ams;
+    p.task_bed_type                = std::move(param.task_bed_type);
+    p.extra_options                = std::move(param.extra_options);
+    p.auto_bed_leveling            = param.auto_bed_leveling;
+    p.auto_flow_cali               = param.auto_flow_cali;
+    p.auto_offset_cali             = param.auto_offset_cali;
+    p.extruder_cali_manual_mode    = param.extruder_cali_manual_mode;
+    p.task_ext_change_assist       = param.task_ext_change_assist;
+    p.try_emmc_print               = param.try_emmc_print;
+    p.svc_context                  = std::move(param.svc_context);
+    p.slicer_uid                   = std::move(param.slicer_uid);
+    p.queue_plate_id.clear();
+
+    return p;
+}
+
 // ============================================================================
 // Function Pointer Loading
 // ============================================================================
