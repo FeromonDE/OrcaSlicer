@@ -167,6 +167,10 @@ void PrinterFileSystem::ListAllFiles()
         req["storage"] = m_file_storage;
     req["api_version"] = 2;
     req["notify"] = "DETAIL";
+    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] LIST_INFO request"
+                               << " type=" << m_file_type
+                               << " storage=" << m_file_storage
+                               << " req=" << req.dump();
     SendRequest<FileList>(LIST_INFO, req, [type = m_file_type](json const& resp, FileList & list, auto) -> int {
         json files = resp["file_lists"];
         for (auto& f : files) {
@@ -181,6 +185,12 @@ void PrinterFileSystem::ListAllFiles()
         }
         return 0;
     }, [this, type = m_file_type](int result, FileList list) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] LIST_INFO callback"
+                                   << " type=" << type
+                                   << " current_type=" << m_file_type
+                                   << " storage=" << m_file_storage
+                                   << " result=" << result
+                                   << " files=" << list.size();
         if (result != 0) {
             m_last_error = result;
             m_status = Status::Failed;
@@ -949,7 +959,7 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     m_task_flags |= FF_THUMNAIL;
     const auto &batch = paths.empty() ? names : paths;
     if (m_file_type == F_MODEL && batch.size() == 1) {
-        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] diagnostic serial chain"
+        BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] diagnostic serial chain"
                                 << " storage=" << m_file_storage
                                 << " file=" << batch.front().name
                                 << " path=" << batch.front().path;
@@ -1051,13 +1061,13 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         }
         req["paths"] = arr;
     }
-    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE request type=" << type
+    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE request type=" << type
                             << " storage=" << m_file_storage
                             << " req=" << req.dump();
 
     SendRequest<File>(
         SUB_FILE, req, [type, files](json const &resp, File &file, unsigned char const *data) -> int {
-            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE response type=" << type
+            BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE response type=" << type
                                     << " path=" << resp.value("path", "")
                                     << " thumbnail=" << resp.value("thumbnail", "")
                                     << " size=" << resp.value("size", 0)
@@ -1088,7 +1098,12 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     file.local_path = iter->local_path + std::string((char *) data, size);
                 else
                     file.local_path = std::string((char *) data, size);
-                ParseThumbnail(file);
+                bool parsed = ParseThumbnail(file);
+                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] ModelMetadata parsed"
+                                           << " path=" << path
+                                           << " bytes=" << file.local_path.size()
+                                           << " ok=" << parsed
+                                           << " thumbnail=" << file.metadata["Thumbnail"];
             } else {
                 if (mimetype.empty()) {
                     if (subpath.empty()) subpath = thumbnail;
@@ -1115,7 +1130,7 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             return 0;
         },
         [this, files, type](int result, File const &file) {
-            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE callback type=" << type
+            BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE callback type=" << type
                                     << " result=" << result
                                     << " file=" << file.name
                                     << " path=" << file.path;
