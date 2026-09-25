@@ -274,7 +274,14 @@ private:
 
     void ScheduleThumbnailUpdate(std::shared_ptr<std::vector<File>> files, int type, int retry, int delay_ms);
 
-    bool TryLoadStorageCache(File &file);
+    enum class StorageCacheLoad
+    {
+        Miss,
+        MetadataOnly,
+        Complete
+    };
+
+    StorageCacheLoad TryLoadStorageCache(File &file);
 
     void SaveStorageCache(File const &file, bool include_thumbnail) const;
 
