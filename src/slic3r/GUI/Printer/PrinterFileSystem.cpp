@@ -1,5 +1,7 @@
 #include "PrinterFileSystem.h"
+#include "FtpsStorageClient.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -67,6 +69,103 @@ static std::string storage_cache_hash(std::string const &value)
     return result;
 }
 
+static std::string ftps_join_path(std::string const &base, std::string const &name)
+{
+    if (base.empty() || base == "/")
+        return "/" + name;
+    return base.back() == '/' ? base + name : base + "/" + name;
+}
+
+static std::string ftps_subtree(std::string const &prefix, std::string const &type)
+{
+    if (type == "timelapse")
+        return ftps_join_path(prefix, "timelapse");
+    if (type == "video")
+        return ftps_join_path(prefix, "ipcam");
+    return prefix.empty() ? "/" : prefix;
+}
+
+static bool ftps_keep_file(std::string const &type, std::string const &name)
+{
+    auto ends_with_ci = [&name](char const *suffix) {
+        const size_t n = std::strlen(suffix);
+        if (name.size() < n)
+            return false;
+        return std::equal(name.end() - n, name.end(), suffix,
+            [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) ==
+                       std::tolower(static_cast<unsigned char>(b));
+            });
+    };
+    if (type == "timelapse")
+        return ends_with_ci(".mp4") || ends_with_ci(".avi");
+    if (type == "video")
+        return ends_with_ci(".mp4");
+    if (type == "model")
+        return ends_with_ci(".3mf") || ends_with_ci(".gcode") || ends_with_ci(".gcode.3mf");
+    return true;
+}
+
+static std::string ftps_base_path(std::string const &path)
+{
+    const size_t hash = path.find('#');
+    return hash == std::string::npos ? path : path.substr(0, hash);
+}
+
+static std::string ftps_sub_path(std::string const &path)
+{
+    const size_t hash = path.find('#');
+    if (hash == std::string::npos)
+        return {};
+    std::string result = path.substr(hash + 1);
+    while (!result.empty() && result.front() == '/')
+        result.erase(result.begin());
+    return result;
+}
+
+static bool ftps_extract_zip_entry(std::string const &archive_data, std::string const &entry_name, std::string &output)
+{
+    output.clear();
+    if (archive_data.empty() || entry_name.empty())
+        return false;
+
+    mz_zip_archive archive{};
+    if (!mz_zip_reader_init_mem(&archive, archive_data.data(), archive_data.size(), 0))
+        return false;
+
+    int index = mz_zip_reader_locate_file(&archive, entry_name.c_str(), nullptr, 0);
+    if (index < 0) {
+        mz_zip_reader_end(&archive);
+        return false;
+    }
+
+    mz_zip_archive_file_stat stat{};
+    if (!mz_zip_reader_file_stat(&archive, index, &stat)) {
+        mz_zip_reader_end(&archive);
+        return false;
+    }
+
+    output.resize(static_cast<size_t>(stat.m_uncomp_size));
+    const bool ok = stat.m_uncomp_size == 0 ||
+                    mz_zip_reader_extract_to_mem(&archive, index, output.data(), output.size(), 0);
+    mz_zip_reader_end(&archive);
+    if (!ok)
+        output.clear();
+    return ok;
+}
+
+static std::string storage_md5_hex(boost::uuids::detail::md5 &md5)
+{
+    boost::uuids::detail::md5::digest_type digest;
+    md5.get_digest(digest);
+    for (int i = 0; i < 4; ++i)
+        digest[i] = boost::endian::endian_reverse(digest[i]);
+    std::string result;
+    const auto bytes = reinterpret_cast<char const *>(&digest[0]);
+    boost::algorithm::hex(bytes, bytes + sizeof(digest), std::back_inserter(result));
+    return result;
+}
+
 static std::map<int, std::string> error_messages = {
      {PrinterFileSystem::ERROR_PIPE, L("Reconnecting the printer, the operation cannot be completed immediately, please try again later.")},
      {PrinterFileSystem::ERROR_RES_BUSY, L("The device cannot handle more conversations. Please retry later.")},
@@ -130,13 +229,45 @@ PrinterFileSystem::PrinterFileSystem()
 
 PrinterFileSystem::~PrinterFileSystem()
 {
-    m_recv_thread.detach();
+    if (m_recv_thread.joinable())
+        m_recv_thread.detach();
 }
 
 void PrinterFileSystem::SetCacheScope(std::string const &printer_id)
 {
     m_cache_scope = printer_id.empty() ? std::string() : storage_cache_hash(printer_id);
     BOOST_LOG_TRIVIAL(info) << "[StorageCache] scope=" << (m_cache_scope.empty() ? "disabled" : m_cache_scope);
+}
+
+void PrinterFileSystem::SetUseFtps(bool enabled)
+{
+    m_use_ftps = enabled;
+    BOOST_LOG_TRIVIAL(info) << "[StorageTransport] mode=" << (m_use_ftps ? "FTPS:990" : "native:6000");
+}
+
+void PrinterFileSystem::SetFtpsEndpoint(std::string const &host, std::string const &user, std::string const &password)
+{
+    {
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_host = host;
+        m_ftps_user = user.empty() ? "bblp" : user;
+        m_ftps_password = password;
+        m_ftps_prefix.clear();
+        m_ftps_storage_label.clear();
+        m_ftps_archive_cache.clear();
+    }
+
+    if (host.empty() || password.empty()) {
+        m_last_error = ERROR_PIPE;
+        m_status = Status::Failed;
+        SendChangedEvent(EVT_STATUS_CHANGED, m_status,
+            "FTPS requires the printer LAN IP address and access code.", ERROR_PIPE);
+        return;
+    }
+
+    m_last_error = 0;
+    m_status = Status::ListSyncing;
+    SendChangedEvent(EVT_STATUS_CHANGED, m_status);
 }
 
 void PrinterFileSystem::SetFileType(FileType type, std::string const &storage)
@@ -158,6 +289,18 @@ void PrinterFileSystem::SetFileType(FileType type, std::string const &storage)
     SendChangedEvent(EVT_FILE_CHANGED);
     if (type == F_INVALID_TYPE)
         return;
+    if (m_use_ftps) {
+        bool ready = false;
+        {
+            boost::unique_lock lock(m_ftps_mutex);
+            ready = !m_ftps_host.empty() && !m_ftps_password.empty();
+        }
+        if (!ready || m_stopped)
+            return;
+        m_status = Status::ListSyncing;
+        SendChangedEvent(EVT_STATUS_CHANGED, m_status);
+        return;
+    }
     if (m_session.tunnel == nullptr)
         return;
     m_status = Status::ListSyncing;
@@ -699,6 +842,8 @@ PrinterFileSystem::File const &PrinterFileSystem::GetFile(size_t index, bool &se
 
 void PrinterFileSystem::Attached()
 {
+    if (m_use_ftps)
+        return;
     boost::unique_lock lock(m_mutex);
     m_recv_thread = boost::thread([w = weak_from_this()] {
         boost::shared_ptr<PrinterFileSystem> s = w.lock();
@@ -708,21 +853,37 @@ void PrinterFileSystem::Attached()
 
 void PrinterFileSystem::Start()
 {
-    boost::unique_lock l(m_mutex);
-    if (!m_stopped) return;
-    m_stopped = false;
-    m_cond.notify_all();
+    {
+        boost::unique_lock l(m_mutex);
+        if (!m_stopped) return;
+        m_stopped = false;
+        if (!m_use_ftps) {
+            m_cond.notify_all();
+            return;
+        }
+    }
+    m_status = Status::Initializing;
+    SendChangedEvent(EVT_STATUS_CHANGED, m_status);
 }
 
 void PrinterFileSystem::Retry()
 {
-    boost::unique_lock l(m_mutex);
-    m_stopped = false;
-    m_cond.notify_all();
+    {
+        boost::unique_lock l(m_mutex);
+        m_stopped = false;
+        if (!m_use_ftps) {
+            m_cond.notify_all();
+            return;
+        }
+    }
+    m_status = Status::Initializing;
+    SendChangedEvent(EVT_STATUS_CHANGED, m_status);
 }
 
 void PrinterFileSystem::SetUrl(std::string const &url)
 {
+    if (m_use_ftps)
+        return;
     boost::unique_lock l(m_mutex);
     m_messages.push_back(url);
     m_cond.notify_all();
@@ -730,6 +891,20 @@ void PrinterFileSystem::SetUrl(std::string const &url)
 
 void PrinterFileSystem::Stop(bool quit)
 {
+    if (m_use_ftps) {
+        {
+            boost::unique_lock l(m_mutex);
+            if (quit)
+                m_session.owner = nullptr;
+            else if (m_stopped)
+                return;
+            m_stopped = true;
+        }
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_cancelled.insert(m_ftps_active.begin(), m_ftps_active.end());
+        return;
+    }
+
     boost::unique_lock l(m_mutex);
     if (quit) {
         m_session.owner = nullptr;
