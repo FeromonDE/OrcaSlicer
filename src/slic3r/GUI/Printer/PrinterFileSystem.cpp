@@ -924,6 +924,7 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     size_t end   = std::min(m_lock_end, GetCount());
     std::vector<File> names;
     std::vector<File> paths;
+    const size_t batch_limit = m_file_type == F_MODEL ? 1 : 2; // Storage diagnostic: serialize model SUB_FILE chains.
     for (; start < end; ++start) {
         auto &file = GetFile(start);
         if ((file.flags & FF_THUMNAIL) == 0) {
@@ -935,7 +936,7 @@ void PrinterFileSystem::UpdateFocusThumbnail()
                 names.push_back({file.name, ""});
             else
                 paths.push_back({file.name, file.path});
-            if (names.size() >= 2 || paths.size() >= 2)
+            if (names.size() >= batch_limit || paths.size() >= batch_limit)
                 break;
             if ((file.flags & FF_THUMNAIL_RETRY) != 0) {
                 const_cast<File&>(file).flags &= ~FF_THUMNAIL_RETRY;
@@ -946,7 +947,14 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     if (names.empty() && paths.empty())
         return;
     m_task_flags |= FF_THUMNAIL;
-    UpdateFocusThumbnail2(std::make_shared<std::vector<File>>(paths.empty() ? names : paths),
+    const auto &batch = paths.empty() ? names : paths;
+    if (m_file_type == F_MODEL && batch.size() == 1) {
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] diagnostic serial chain"
+                                << " storage=" << m_file_storage
+                                << " file=" << batch.front().name
+                                << " path=" << batch.front().path;
+    }
+    UpdateFocusThumbnail2(std::make_shared<std::vector<File>>(batch),
         paths.empty() ? OldThumbnail : m_file_type == F_MODEL ? ModelMetadata : VideoThumbnail);
 }
 
