@@ -970,25 +970,25 @@ std::string PrinterFileSystem::StorageCachePath(File const &file, char const *ex
     return (dir / (storage_cache_hash(identity.str()) + extension)).string();
 }
 
-bool PrinterFileSystem::TryLoadStorageCache(File &file)
+PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File &file)
 {
     if (m_file_type != F_MODEL)
-        return false;
+        return StorageCacheLoad::Miss;
 
     auto json_name = StorageCachePath(file, ".json");
     if (json_name.empty())
-        return false;
+        return StorageCacheLoad::Miss;
 
     boost::filesystem::path json_path(json_name);
     if (!boost::filesystem::exists(json_path)) {
         BOOST_LOG_TRIVIAL(info) << "[StorageCache] miss path=" << file.path;
-        return false;
+        return StorageCacheLoad::Miss;
     }
 
     try {
         boost::filesystem::ifstream stream(json_path);
         if (!stream)
-            return false;
+            return StorageCacheLoad::Miss;
 
         json entry;
         stream >> entry;
@@ -999,7 +999,7 @@ bool PrinterFileSystem::TryLoadStorageCache(File &file)
             entry.value("size", boost::uint64_t(0)) != file.size ||
             entry.value("time", int64_t(0)) != static_cast<int64_t>(file.time)) {
             BOOST_LOG_TRIVIAL(info) << "[StorageCache] stale path=" << file.path;
-            return false;
+            return StorageCacheLoad::Miss;
         }
 
         auto metadata = entry.at("metadata").get<std::map<std::string, std::string>>();
@@ -1008,30 +1008,34 @@ bool PrinterFileSystem::TryLoadStorageCache(File &file)
             auto png_name = StorageCachePath(file, ".png");
             boost::filesystem::path png_path(png_name);
             if (!boost::filesystem::exists(png_path))
-                return false;
+                return StorageCacheLoad::Miss;
             std::string png_utf8 = Slic3r::decode_path(png_path.string().c_str());
             wxImage image;
             if (!image.LoadFile(wxString::FromUTF8(png_utf8.c_str()), wxBITMAP_TYPE_PNG) || !image.IsOk())
-                return false;
+                return StorageCacheLoad::Miss;
             file.thumbnail = wxBitmap(image);
-        } else {
-            auto it = metadata.find("Thumbnail");
-            if (it != metadata.end() && !it->second.empty())
-                return false;
         }
 
         file.metadata = std::move(metadata);
+        auto thumbnail_it = file.metadata.find("Thumbnail");
+        const bool expects_thumbnail = thumbnail_it != file.metadata.end() && !thumbnail_it->second.empty();
+
+        if (!has_thumbnail && expects_thumbnail) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] metadata hit path=" << file.path;
+            return StorageCacheLoad::MetadataOnly;
+        }
+
         file.flags |= FF_THUMNAIL;
-        BOOST_LOG_TRIVIAL(info) << "[StorageCache] hit path=" << file.path
+        BOOST_LOG_TRIVIAL(info) << "[StorageCache] complete hit path=" << file.path
                                 << " thumbnail=" << has_thumbnail;
-        return true;
+        return StorageCacheLoad::Complete;
     } catch (std::exception const &e) {
         BOOST_LOG_TRIVIAL(warning) << "[StorageCache] read failed path=" << file.path
                                    << " error=" << e.what();
-        return false;
+        return StorageCacheLoad::Miss;
     } catch (...) {
         BOOST_LOG_TRIVIAL(warning) << "[StorageCache] read failed path=" << file.path;
-        return false;
+        return StorageCacheLoad::Miss;
     }
 }
 
@@ -1045,10 +1049,6 @@ void PrinterFileSystem::SaveStorageCache(File const &file, bool include_thumbnai
         return;
 
     bool has_thumbnail = include_thumbnail && file.thumbnail.IsOk();
-    auto thumbnail_it = file.metadata.find("Thumbnail");
-    bool expects_thumbnail = thumbnail_it != file.metadata.end() && !thumbnail_it->second.empty();
-    if (expects_thumbnail && !has_thumbnail)
-        return;
 
     try {
         boost::filesystem::path json_path(json_name);
@@ -1100,23 +1100,38 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     size_t end   = std::min(m_lock_end, GetCount());
     std::vector<File> names;
     std::vector<File> paths;
-    const size_t batch_limit = m_file_type == F_MODEL ? 1 : 2; // Storage diagnostic: serialize model SUB_FILE chains.
+    bool start_with_cached_metadata = false;
+    const size_t batch_limit = m_file_type == F_MODEL ? 1 : 2; // Serialize model SUB_FILE chains on A1.
     for (; start < end; ++start) {
         auto &file = GetFile(start);
         if ((file.flags & FF_THUMNAIL) == 0) {
             if (m_file_type == F_MODEL) {
                 auto &mutable_file = const_cast<File &>(file);
-                if (TryLoadStorageCache(mutable_file)) {
+                auto cache = TryLoadStorageCache(mutable_file);
+                if (cache == StorageCacheLoad::Complete) {
                     SendChangedEvent(EVT_THUMBNAIL, start, file.name);
                     continue;
                 }
-                mutable_file.metadata.emplace("Time", "...");
-                mutable_file.metadata.emplace("Weight", "...");
+                if (cache == StorageCacheLoad::MetadataOnly && !file.path.empty()) {
+                    File cached_file = mutable_file;
+                    // ModelThumbnail normally follows a successful ModelMetadata response,
+                    // where the temporary File is marked complete before entering the next
+                    // phase. Preserve the same state so retry bookkeeping does not discard
+                    // the cached metadata.
+                    cached_file.flags |= FF_THUMNAIL;
+                    paths.push_back(std::move(cached_file));
+                    start_with_cached_metadata = true;
+                } else {
+                    mutable_file.metadata.emplace("Time", "...");
+                    mutable_file.metadata.emplace("Weight", "...");
+                }
             }
-            if (file.path.empty())
-                names.push_back({file.name, ""});
-            else
-                paths.push_back({file.name, file.path});
+            if (!start_with_cached_metadata) {
+                if (file.path.empty())
+                    names.push_back({file.name, ""});
+                else
+                    paths.push_back({file.name, file.path});
+            }
             if (names.size() >= batch_limit || paths.size() >= batch_limit)
                 break;
             if ((file.flags & FF_THUMNAIL_RETRY) != 0) {
@@ -1130,13 +1145,16 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     m_task_flags |= FF_THUMNAIL;
     const auto &batch = paths.empty() ? names : paths;
     if (m_file_type == F_MODEL && batch.size() == 1) {
-        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] diagnostic serial chain"
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] serial model chain"
                                 << " storage=" << m_file_storage
                                 << " file=" << batch.front().name
-                                << " path=" << batch.front().path;
+                                << " path=" << batch.front().path
+                                << " cached_metadata=" << start_with_cached_metadata;
     }
     UpdateFocusThumbnail2(std::make_shared<std::vector<File>>(batch),
-        paths.empty() ? OldThumbnail : m_file_type == F_MODEL ? ModelMetadata : VideoThumbnail);
+        paths.empty() ? OldThumbnail :
+        m_file_type == F_MODEL ? (start_with_cached_metadata ? ModelThumbnail : ModelMetadata) :
+        VideoThumbnail);
 }
 
 bool PrinterFileSystem::ParseThumbnail(File &file)
@@ -1211,7 +1229,12 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             for (auto &path : fails) {
                 auto iter = std::find_if(m_file_list.begin(), m_file_list.end(), [&path](auto &f) { return f.path == path; });
                 if (iter != m_file_list.end()) {
-                    if (type == ModelThumbnail) iter->metadata.clear();
+                    if (type == ModelThumbnail) {
+                        auto source = std::find_if(files->begin(), files->end(),
+                                                   [&path](auto &f) { return f.path == path; });
+                        if (source == files->end() || source->metadata.empty())
+                            iter->metadata.clear();
+                    }
                     iter->flags |= fails.size() == 1 ? FF_THUMNAIL : FF_THUMNAIL_RETRY;
                 }
             }
@@ -1317,10 +1340,14 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             if (iter != m_file_list.end()) {
                 if (type == ModelMetadata) {
                     iter->metadata = file.metadata;
+                    // Persist phase 1 immediately. If the following thumbnail request
+                    // fails or drops the tunnel, the next session can resume directly
+                    // with ModelThumbnail instead of fetching the five 3MF metadata
+                    // members again.
+                    SaveStorageCache(*iter, false);
                     auto thumbnail = iter->metadata["Thumbnail"];
                     if (thumbnail.empty()) {
                         iter->flags |= FF_THUMNAIL; // DOTO: retry on fail
-                        SaveStorageCache(*iter, false);
                     }
                     int index       = iter - m_file_list.begin();
                     SendChangedEvent(EVT_THUMBNAIL, index, file.name);
