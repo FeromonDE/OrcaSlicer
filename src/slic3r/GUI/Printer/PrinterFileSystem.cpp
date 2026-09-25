@@ -1330,7 +1330,10 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     iter->flags |= FF_THUMNAIL; // DOTO: retry on fail
                     if (file.thumbnail.IsOk()) {
                         iter->thumbnail = file.thumbnail;
-                        SaveStorageCache(*iter, true);
+                        File cache_file = *iter;
+                        if (iter2 != files->end())
+                            cache_file.metadata = iter2->metadata;
+                        SaveStorageCache(cache_file, true);
                         int index       = iter - m_file_list.begin();
                         SendChangedEvent(EVT_THUMBNAIL, index, file.name);
                     }
