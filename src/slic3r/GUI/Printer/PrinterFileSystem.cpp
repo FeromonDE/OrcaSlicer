@@ -1403,6 +1403,21 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     return;
                 }
 
+                if (result == ERROR_PIPE) {
+                    // Keep the failed model unresolved. Reconnect performs LIST_INFO again,
+                    // and the partial metadata cache lets the next attempt resume at the
+                    // thumbnail phase instead of repeating the five-file metadata fetch.
+                    for (auto &f : *files) {
+                        f.flags &= ~(FF_THUMNAIL | FF_THUMNAIL_RETRY);
+                        auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                               [&f](auto &entry) { return entry.path == f.path; });
+                        if (it != m_file_list.end())
+                            it->flags &= ~(FF_THUMNAIL | FF_THUMNAIL_RETRY);
+                    }
+                    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] pipe lost; keeping thumbnail unresolved";
+                    return;
+                }
+
                 // A permanently unreadable thumbnail must not make the whole Storage view
                 // unusable. Mark only this file as handled and continue with the next one.
                 for (auto &f : *files) {
@@ -1411,13 +1426,6 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                                            [&f](auto &entry) { return entry.path == f.path; });
                     if (it != m_file_list.end())
                         it->flags |= FF_THUMNAIL;
-                }
-
-                if (result == ERROR_PIPE) {
-                    // Let the existing reconnect machinery restore the tunnel. A new focus
-                    // update will resume unresolved files once the connection is usable.
-                    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] pipe lost; waiting for reconnect";
-                    return;
                 }
 
                 ScheduleThumbnailUpdate(files, FinishThumbnail, 0, 250);
