@@ -764,6 +764,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BBLPrinterAgent.hpp
     Utils/BBLNetworkPlugin.cpp
     Utils/BBLNetworkPlugin.hpp
+    Utils/PluginVerifyRedirect.cpp
+    Utils/PluginVerifyRedirect.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp
@@ -891,6 +893,20 @@ target_include_directories(libslic3r_gui PRIVATE Utils ${CMAKE_CURRENT_BINARY_DI
 if (WIN32)
     target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)
     target_link_libraries(libslic3r_gui Advapi32)
+
+    # MinHook only supports x86/x64. The signed-host bridge is therefore
+    # enabled for Windows x64 builds only; Windows ARM64 keeps normal Orca networking.
+    if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64|ARM64EC)$")
+        include(FetchContent)
+        FetchContent_Declare(minhook
+            GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+            GIT_TAG 8af6b4acae5a9388fd742b56fa79ece89d96f823
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(minhook)
+        target_link_libraries(libslic3r_gui minhook)
+        target_compile_definitions(libslic3r_gui PRIVATE ORCA_BAMBU_SIGNED_HOST_BRIDGE=1)
+    endif()
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})

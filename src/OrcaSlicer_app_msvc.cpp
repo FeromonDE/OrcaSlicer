@@ -1,5 +1,5 @@
 // Why?
-#define _WIN32_WINNT 0x0502
+#define _WIN32_WINNT 0x0601
 // The standard Windows includes.
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -209,6 +209,231 @@ extern "C" {
     Slic3rMainFunc orcaslicer_main = nullptr;
 }
 
+
+enum class BambuHostStageResult {
+    Ready,
+    NoBambuStudio,
+    NeedsElevation,
+    Failed
+};
+
+static bool find_bambu_studio(wchar_t* exe, wchar_t* dir)
+{
+    exe[0] = 0;
+    dir[0] = 0;
+
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Bambu Studio",
+            0,
+            KEY_READ | KEY_WOW64_64KEY,
+            &key) != ERROR_SUCCESS)
+        return false;
+
+    wchar_t icon[MAX_PATH + 1] = {0};
+    DWORD bytes = sizeof(icon) - sizeof(wchar_t);
+    DWORD type = 0;
+    const LONG rc = ::RegQueryValueExW(
+        key, L"DisplayIcon", nullptr, &type,
+        reinterpret_cast<LPBYTE>(icon), &bytes);
+    ::RegCloseKey(key);
+
+    if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+        return false;
+
+    wchar_t* comma = wcsrchr(icon, L',');
+    wchar_t* slash = wcsrchr(icon, L'\\');
+    if (comma && (!slash || comma > slash))
+        *comma = 0;
+
+    slash = wcsrchr(icon, L'\\');
+    if (!slash || ::GetFileAttributesW(icon) == INVALID_FILE_ATTRIBUTES)
+        return false;
+
+    wcscpy_s(exe, MAX_PATH, icon);
+    slash[1] = 0;
+    wcscpy_s(dir, MAX_PATH, icon);
+    return true;
+}
+
+static bool same_file_identity(const wchar_t* a, const wchar_t* b)
+{
+    WIN32_FILE_ATTRIBUTE_DATA aa = {};
+    WIN32_FILE_ATTRIBUTE_DATA bb = {};
+    if (!::GetFileAttributesExW(a, GetFileExInfoStandard, &aa) ||
+        !::GetFileAttributesExW(b, GetFileExInfoStandard, &bb))
+        return false;
+
+    return aa.nFileSizeHigh == bb.nFileSizeHigh &&
+           aa.nFileSizeLow == bb.nFileSizeLow &&
+           aa.ftLastWriteTime.dwHighDateTime == bb.ftLastWriteTime.dwHighDateTime &&
+           aa.ftLastWriteTime.dwLowDateTime == bb.ftLastWriteTime.dwLowDateTime;
+}
+
+static BambuHostStageResult stage_current_bambu_host(const wchar_t* orca_dir)
+{
+    wchar_t source_exe[MAX_PATH + 1] = {0};
+    wchar_t source_dir[MAX_PATH + 1] = {0};
+    if (!find_bambu_studio(source_exe, source_dir))
+        return BambuHostStageResult::NoBambuStudio;
+
+    wchar_t staged_exe[MAX_PATH + 1] = {0};
+    wcscpy_s(staged_exe, MAX_PATH, orca_dir);
+    wcscat_s(staged_exe, MAX_PATH, L"bambu-studio.exe");
+
+    if (same_file_identity(source_exe, staged_exe))
+        return BambuHostStageResult::Ready;
+
+    if (::CopyFileW(source_exe, staged_exe, FALSE))
+        return BambuHostStageResult::Ready;
+
+    const DWORD error = ::GetLastError();
+    if (error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION)
+        return BambuHostStageResult::NeedsElevation;
+
+    return BambuHostStageResult::Failed;
+}
+
+static bool elevate_host_stage(const wchar_t* self_exe)
+{
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"runas";
+    info.lpFile = self_exe;
+    info.lpParameters = L"--stage-bambu-host";
+    info.nShow = SW_HIDE;
+
+    if (!::ShellExecuteExW(&info) || !info.hProcess)
+        return false;
+
+    ::WaitForSingleObject(info.hProcess, 120000);
+    DWORD exit_code = 1;
+    ::GetExitCodeProcess(info.hProcess, &exit_code);
+    ::CloseHandle(info.hProcess);
+    return exit_code == 0;
+}
+
+static bool launch_bambu_host(const wchar_t* orca_dir, int argc, wchar_t** argv)
+{
+    wchar_t host_exe[MAX_PATH + 1] = {0};
+    wcscpy_s(host_exe, MAX_PATH, orca_dir);
+    wcscat_s(host_exe, MAX_PATH, L"bambu-studio.exe");
+    if (::GetFileAttributesW(host_exe) == INVALID_FILE_ATTRIBUTES)
+        return false;
+
+    std::wstring command = L"\"";
+    command += host_exe;
+    command += L"\"";
+    for (int i = 1; i < argc; ++i) {
+        command += L" \"";
+        command += argv[i];
+        command += L"\"";
+    }
+    std::vector<wchar_t> command_buffer(command.begin(), command.end());
+    command_buffer.push_back(L'\0');
+
+    // The genuine Bambu launcher loads our BambuStudio.dll directly and does not
+    // add Orca's bundled Python directory to the DLL search path. Prepend it to
+    // PATH for the child so transitive imports such as python312.dll can resolve.
+    DWORD path_size = ::GetEnvironmentVariableW(L"PATH", nullptr, 0);
+    std::wstring original_path;
+    if (path_size > 0) {
+        std::vector<wchar_t> path_buffer(path_size);
+        if (::GetEnvironmentVariableW(L"PATH", path_buffer.data(), path_size) > 0)
+            original_path.assign(path_buffer.data());
+    }
+
+    std::wstring child_path = orca_dir;
+    child_path += L"python";
+    if (!original_path.empty()) {
+        child_path += L";";
+        child_path += original_path;
+    }
+    ::SetEnvironmentVariableW(L"PATH", child_path.c_str());
+
+    PROCESS_INFORMATION process = {};
+    BOOL launched = FALSE;
+
+    DWORD shell_pid = 0;
+    ::GetWindowThreadProcessId(::GetShellWindow(), &shell_pid);
+    HANDLE shell_process = shell_pid
+        ? ::OpenProcess(PROCESS_CREATE_PROCESS, FALSE, shell_pid)
+        : nullptr;
+
+    if (shell_process) {
+        STARTUPINFOEXW startup = {};
+        startup.StartupInfo.cb = sizeof(startup);
+
+        SIZE_T attribute_size = 0;
+        ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
+        startup.lpAttributeList =
+            reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+                ::HeapAlloc(::GetProcessHeap(), 0, attribute_size));
+
+        if (startup.lpAttributeList &&
+            ::InitializeProcThreadAttributeList(
+                startup.lpAttributeList, 1, 0, &attribute_size) &&
+            ::UpdateProcThreadAttribute(
+                startup.lpAttributeList,
+                0,
+                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+                &shell_process,
+                sizeof(shell_process),
+                nullptr,
+                nullptr)) {
+            launched = ::CreateProcessW(
+                host_exe,
+                command_buffer.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                EXTENDED_STARTUPINFO_PRESENT,
+                nullptr,
+                orca_dir,
+                &startup.StartupInfo,
+                &process);
+        }
+
+        if (startup.lpAttributeList) {
+            ::DeleteProcThreadAttributeList(startup.lpAttributeList);
+            ::HeapFree(::GetProcessHeap(), 0, startup.lpAttributeList);
+        }
+        ::CloseHandle(shell_process);
+    }
+
+    if (!launched) {
+        STARTUPINFOW startup = {};
+        startup.cb = sizeof(startup);
+        launched = ::CreateProcessW(
+            host_exe,
+            command_buffer.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            0,
+            nullptr,
+            orca_dir,
+            &startup,
+            &process);
+    }
+
+    // Restore Orca's own environment after CreateProcess; the child already
+    // received its private copy.
+    if (path_size > 0)
+        ::SetEnvironmentVariableW(L"PATH", original_path.c_str());
+    else
+        ::SetEnvironmentVariableW(L"PATH", nullptr);
+
+    if (!launched)
+        return false;
+
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    return true;
+}
+
 extern "C" {
 #ifdef SLIC3R_WRAPPER_NOCONSOLE
 int APIENTRY wWinMain(HINSTANCE /* hInstance */, HINSTANCE /* hPrevInstance */, PWSTR /* lpCmdLine */, int /* nCmdShow */)
@@ -236,7 +461,12 @@ int wmain(int argc, wchar_t **argv)
     // Here one may push some additional parameters based on the wrapper type.
     bool force_mesa = false;
 #endif /* SLIC3R_GUI */
+    bool stage_bambu_host_only = false;
     for (int i = 1; i < argc; ++ i) {
+        if (wcscmp(argv[i], L"--stage-bambu-host") == 0) {
+            stage_bambu_host_only = true;
+            continue;
+        }
 #ifdef SLIC3R_GUI
         if (wcscmp(argv[i], L"--sw-renderer") == 0)
             force_mesa = true;
@@ -249,21 +479,54 @@ int wmain(int argc, wchar_t **argv)
 
 #ifdef SLIC3R_GUI
     OpenGLVersionCheck opengl_version_check;
-    bool load_mesa =
-        // Forced from the command line.
-        force_mesa ||
-        // Try to load the default OpenGL driver and test its context version.
-        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(2, 0);
+    bool load_mesa = false;
+    if (!stage_bambu_host_only) {
+        load_mesa =
+            // Forced from the command line.
+            force_mesa ||
+            // Try to load the default OpenGL driver and test its context version.
+            ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(2, 0);
+    }
 #endif /* SLIC3R_GUI */
 
     wchar_t path_to_exe[MAX_PATH + 1] = { 0 };
     ::GetModuleFileNameW(nullptr, path_to_exe, MAX_PATH);
+    wchar_t self_exe[MAX_PATH + 1] = { 0 };
+    wcscpy_s(self_exe, MAX_PATH, path_to_exe);
+
     wchar_t drive[_MAX_DRIVE];
     wchar_t dir[_MAX_DIR];
     wchar_t fname[_MAX_FNAME];
     wchar_t ext[_MAX_EXT];
     _wsplitpath(path_to_exe, drive, dir, fname, ext);
     _wmakepath(path_to_exe, drive, dir, nullptr, nullptr);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    if (stage_bambu_host_only) {
+        const BambuHostStageResult staged = stage_current_bambu_host(path_to_exe);
+        return staged == BambuHostStageResult::Ready ? 0 : 1;
+    }
+
+    // Direct Orca launch: refresh the staged host from the currently installed
+    // Bambu Studio whenever its signed executable changes, then relaunch under it.
+    // If Bambu Studio is absent, continue in normal Orca mode.
+    if (_wcsicmp(fname, L"bambu-studio") != 0) {
+        BambuHostStageResult staged = stage_current_bambu_host(path_to_exe);
+
+        if (staged == BambuHostStageResult::NeedsElevation &&
+            elevate_host_stage(self_exe)) {
+            staged = stage_current_bambu_host(path_to_exe);
+        }
+
+        if (staged == BambuHostStageResult::Ready &&
+            launch_bambu_host(path_to_exe, argc, argv)) {
+            return 0;
+        }
+    }
+#else
+    if (stage_bambu_host_only)
+        return 1;
+#endif
 
     wchar_t path_to_python[MAX_PATH + 1] = { 0 };
     wcscpy(path_to_python, path_to_exe);
@@ -293,11 +556,11 @@ int wmain(int argc, wchar_t **argv)
 
     wchar_t path_to_slic3r[MAX_PATH + 1] = { 0 };
     wcscpy(path_to_slic3r, path_to_exe);
-    wcscat(path_to_slic3r, L"OrcaSlicer.dll");
+    wcscat(path_to_slic3r, L"BambuStudio.dll");
 //	printf("Loading Slic3r library: %S\n", path_to_slic3r);
     HINSTANCE hInstance_Slic3r = LoadLibraryExW(path_to_slic3r, nullptr, 0);
     if (hInstance_Slic3r == nullptr) {
-        printf("OrcaSlicer.dll was not loaded, error=%lu\n", GetLastError());
+        printf("BambuStudio.dll was not loaded, error=%lu\n", GetLastError());
         return -1;
     }
 
@@ -311,7 +574,7 @@ int wmain(int argc, wchar_t **argv)
 #endif
         );
     if (orcaslicer_main == nullptr) {
-        printf("could not locate the function orcaslicer_main in OrcaSlicer.dll\n");
+        printf("could not locate the function orcaslicer_main in BambuStudio.dll\n");
         return -1;
     }
     // argc minus the trailing nullptr of the argv

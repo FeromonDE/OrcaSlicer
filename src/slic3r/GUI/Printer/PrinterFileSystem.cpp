@@ -9,6 +9,8 @@
 
 #include <boost/algorithm/hex.hpp>
 #include <boost/endian/conversion.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/uuid/detail/md5.hpp>
 #include <boost/regex.hpp>
@@ -47,6 +49,23 @@ wxDEFINE_EVENT(EVT_UPLOAD_CHANGED, wxCommandEvent);
 wxDEFINE_EVENT(EVT_FILE_CALLBACK, wxCommandEvent);
 
 static wxBitmap default_thumbnail;
+
+static constexpr int STORAGE_CACHE_VERSION = 1;
+
+static std::string storage_cache_hash(std::string const &value)
+{
+    boost::uuids::detail::md5 md5;
+    md5.process_bytes(value.data(), value.size());
+    boost::uuids::detail::md5::digest_type digest;
+    md5.get_digest(digest);
+    for (int i = 0; i < 4; ++i)
+        digest[i] = boost::endian::endian_reverse(digest[i]);
+
+    std::string result;
+    auto bytes = reinterpret_cast<char const *>(&digest[0]);
+    boost::algorithm::hex(bytes, bytes + sizeof(digest), std::back_inserter(result));
+    return result;
+}
 
 static std::map<int, std::string> error_messages = {
      {PrinterFileSystem::ERROR_PIPE, L("Reconnecting the printer, the operation cannot be completed immediately, please try again later.")},
@@ -114,15 +133,24 @@ PrinterFileSystem::~PrinterFileSystem()
     m_recv_thread.detach();
 }
 
+void PrinterFileSystem::SetCacheScope(std::string const &printer_id)
+{
+    m_cache_scope = printer_id.empty() ? std::string() : storage_cache_hash(printer_id);
+    BOOST_LOG_TRIVIAL(info) << "[StorageCache] scope=" << (m_cache_scope.empty() ? "disabled" : m_cache_scope);
+}
+
 void PrinterFileSystem::SetFileType(FileType type, std::string const &storage)
 {
     if (m_file_type == type && m_file_storage == storage)
         return;
+    bool storage_only_changed = (m_file_type == type && m_file_storage != storage);
     SelectAll(false);
     assert(m_file_list_cache[std::make_pair(m_file_type, m_file_storage)].empty());
     m_file_list.swap(m_file_list_cache[{m_file_type, m_file_storage}]);
     std::swap(m_file_type, type);
     m_file_storage = storage;
+    if (storage_only_changed)
+        m_file_list_cache[{m_file_type, m_file_storage}].clear();
     m_file_list.swap(m_file_list_cache[{m_file_type, m_file_storage}]);
     m_lock_start = m_lock_end = 0;
     BuildGroups();
@@ -164,6 +192,10 @@ void PrinterFileSystem::ListAllFiles()
         req["storage"] = m_file_storage;
     req["api_version"] = 2;
     req["notify"] = "DETAIL";
+    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] LIST_INFO request"
+                               << " type=" << m_file_type
+                               << " storage=" << m_file_storage
+                               << " req=" << req.dump();
     SendRequest<FileList>(LIST_INFO, req, [type = m_file_type](json const& resp, FileList & list, auto) -> int {
         json files = resp["file_lists"];
         for (auto& f : files) {
@@ -178,6 +210,12 @@ void PrinterFileSystem::ListAllFiles()
         }
         return 0;
     }, [this, type = m_file_type](int result, FileList list) {
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] LIST_INFO callback"
+                                   << " type=" << type
+                                   << " current_type=" << m_file_type
+                                   << " storage=" << m_file_storage
+                                   << " result=" << result
+                                   << " files=" << list.size();
         if (result != 0) {
             m_last_error = result;
             m_status = Status::Failed;
@@ -912,6 +950,147 @@ enum ThumbnailType
     FinishThumbnail
 };
 
+std::string PrinterFileSystem::StorageCachePath(File const &file, char const *extension) const
+{
+    if (m_cache_scope.empty() || file.time == 0 || file.size == 0)
+        return {};
+
+    std::ostringstream identity;
+    identity << STORAGE_CACHE_VERSION << '\n'
+             << m_cache_scope << '\n'
+             << m_file_storage << '\n'
+             << file.path << '\n'
+             << file.name << '\n'
+             << file.size << '\n'
+             << static_cast<long long>(file.time);
+
+    boost::filesystem::path dir = boost::filesystem::path(Slic3r::data_dir()) /
+                                  "storage_cache" /
+                                  m_cache_scope;
+    return (dir / (storage_cache_hash(identity.str()) + extension)).string();
+}
+
+PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File &file)
+{
+    if (m_file_type != F_MODEL)
+        return StorageCacheLoad::Miss;
+
+    auto json_name = StorageCachePath(file, ".json");
+    if (json_name.empty())
+        return StorageCacheLoad::Miss;
+
+    boost::filesystem::path json_path(json_name);
+    if (!boost::filesystem::exists(json_path)) {
+        BOOST_LOG_TRIVIAL(info) << "[StorageCache] miss path=" << file.path;
+        return StorageCacheLoad::Miss;
+    }
+
+    try {
+        boost::filesystem::ifstream stream(json_path);
+        if (!stream)
+            return StorageCacheLoad::Miss;
+
+        json entry;
+        stream >> entry;
+        if (entry.value("version", 0) != STORAGE_CACHE_VERSION ||
+            entry.value("storage", std::string()) != m_file_storage ||
+            entry.value("path", std::string()) != file.path ||
+            entry.value("name", std::string()) != file.name ||
+            entry.value("size", boost::uint64_t(0)) != file.size ||
+            entry.value("time", int64_t(0)) != static_cast<int64_t>(file.time)) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] stale path=" << file.path;
+            return StorageCacheLoad::Miss;
+        }
+
+        auto metadata = entry.at("metadata").get<std::map<std::string, std::string>>();
+        bool has_thumbnail = entry.value("has_thumbnail", false);
+        if (has_thumbnail) {
+            auto png_name = StorageCachePath(file, ".png");
+            boost::filesystem::path png_path(png_name);
+            if (!boost::filesystem::exists(png_path))
+                return StorageCacheLoad::Miss;
+            std::string png_utf8 = Slic3r::decode_path(png_path.string().c_str());
+            wxImage image;
+            if (!image.LoadFile(wxString::FromUTF8(png_utf8.c_str()), wxBITMAP_TYPE_PNG) || !image.IsOk())
+                return StorageCacheLoad::Miss;
+            file.thumbnail = wxBitmap(image);
+        }
+
+        file.metadata = std::move(metadata);
+        auto thumbnail_it = file.metadata.find("Thumbnail");
+        const bool expects_thumbnail = thumbnail_it != file.metadata.end() && !thumbnail_it->second.empty();
+
+        if (!has_thumbnail && expects_thumbnail) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] metadata hit path=" << file.path;
+            return StorageCacheLoad::MetadataOnly;
+        }
+
+        file.flags |= FF_THUMNAIL;
+        BOOST_LOG_TRIVIAL(info) << "[StorageCache] complete hit path=" << file.path
+                                << " thumbnail=" << has_thumbnail;
+        return StorageCacheLoad::Complete;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageCache] read failed path=" << file.path
+                                   << " error=" << e.what();
+        return StorageCacheLoad::Miss;
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageCache] read failed path=" << file.path;
+        return StorageCacheLoad::Miss;
+    }
+}
+
+void PrinterFileSystem::SaveStorageCache(File const &file, bool include_thumbnail) const
+{
+    if (m_file_type != F_MODEL || file.metadata.empty())
+        return;
+
+    auto json_name = StorageCachePath(file, ".json");
+    if (json_name.empty())
+        return;
+
+    bool has_thumbnail = include_thumbnail && file.thumbnail.IsOk();
+
+    try {
+        boost::filesystem::path json_path(json_name);
+        boost::filesystem::create_directories(json_path.parent_path());
+
+        if (has_thumbnail) {
+            boost::filesystem::path png_path(StorageCachePath(file, ".png"));
+            std::string png_utf8 = Slic3r::decode_path(png_path.string().c_str());
+            wxImage image = file.thumbnail.ConvertToImage();
+            if (!image.IsOk() ||
+                !image.SaveFile(wxString::FromUTF8(png_utf8.c_str()), wxBITMAP_TYPE_PNG)) {
+                BOOST_LOG_TRIVIAL(warning) << "[StorageCache] thumbnail write failed path=" << file.path;
+                return;
+            }
+        }
+
+        json entry;
+        entry["version"] = STORAGE_CACHE_VERSION;
+        entry["storage"] = m_file_storage;
+        entry["path"] = file.path;
+        entry["name"] = file.name;
+        entry["size"] = file.size;
+        entry["time"] = static_cast<int64_t>(file.time);
+        entry["metadata"] = file.metadata;
+        entry["has_thumbnail"] = has_thumbnail;
+
+        boost::filesystem::ofstream stream(json_path, std::ios::trunc);
+        if (!stream)
+            return;
+        stream << entry.dump();
+        stream.close();
+
+        BOOST_LOG_TRIVIAL(info) << "[StorageCache] saved path=" << file.path
+                                << " thumbnail=" << has_thumbnail;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageCache] write failed path=" << file.path
+                                   << " error=" << e.what();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageCache] write failed path=" << file.path;
+    }
+}
+
 void PrinterFileSystem::UpdateFocusThumbnail()
 {
     m_task_flags &= ~FF_THUMNAIL;
@@ -921,18 +1100,39 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     size_t end   = std::min(m_lock_end, GetCount());
     std::vector<File> names;
     std::vector<File> paths;
+    bool start_with_cached_metadata = false;
+    const size_t batch_limit = m_file_type == F_MODEL ? 1 : 2; // Serialize model SUB_FILE chains on A1.
     for (; start < end; ++start) {
         auto &file = GetFile(start);
         if ((file.flags & FF_THUMNAIL) == 0) {
             if (m_file_type == F_MODEL) {
-                const_cast<File &>(file).metadata.emplace("Time", "...");
-                const_cast<File &>(file).metadata.emplace("Weight", "...");
+                auto &mutable_file = const_cast<File &>(file);
+                auto cache = TryLoadStorageCache(mutable_file);
+                if (cache == StorageCacheLoad::Complete) {
+                    SendChangedEvent(EVT_THUMBNAIL, start, file.name);
+                    continue;
+                }
+                if (cache == StorageCacheLoad::MetadataOnly && !file.path.empty()) {
+                    File cached_file = mutable_file;
+                    // ModelThumbnail normally follows a successful ModelMetadata response,
+                    // where the temporary File is marked complete before entering the next
+                    // phase. Preserve the same state so retry bookkeeping does not discard
+                    // the cached metadata.
+                    cached_file.flags |= FF_THUMNAIL;
+                    paths.push_back(std::move(cached_file));
+                    start_with_cached_metadata = true;
+                } else {
+                    mutable_file.metadata.emplace("Time", "...");
+                    mutable_file.metadata.emplace("Weight", "...");
+                }
             }
-            if (file.path.empty())
-                names.push_back({file.name, ""});
-            else
-                paths.push_back({file.name, file.path});
-            if (names.size() >= 2 || paths.size() >= 2)
+            if (!start_with_cached_metadata) {
+                if (file.path.empty())
+                    names.push_back({file.name, ""});
+                else
+                    paths.push_back({file.name, file.path});
+            }
+            if (names.size() >= batch_limit || paths.size() >= batch_limit)
                 break;
             if ((file.flags & FF_THUMNAIL_RETRY) != 0) {
                 const_cast<File&>(file).flags &= ~FF_THUMNAIL_RETRY;
@@ -943,8 +1143,18 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     if (names.empty() && paths.empty())
         return;
     m_task_flags |= FF_THUMNAIL;
-    UpdateFocusThumbnail2(std::make_shared<std::vector<File>>(paths.empty() ? names : paths),
-        paths.empty() ? OldThumbnail : m_file_type == F_MODEL ? ModelMetadata : VideoThumbnail);
+    const auto &batch = paths.empty() ? names : paths;
+    if (m_file_type == F_MODEL && batch.size() == 1) {
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] serial model chain"
+                                << " storage=" << m_file_storage
+                                << " file=" << batch.front().name
+                                << " path=" << batch.front().path
+                                << " cached_metadata=" << start_with_cached_metadata;
+    }
+    UpdateFocusThumbnail2(std::make_shared<std::vector<File>>(batch),
+        paths.empty() ? OldThumbnail :
+        m_file_type == F_MODEL ? (start_with_cached_metadata ? ModelThumbnail : ModelMetadata) :
+        VideoThumbnail);
 }
 
 bool PrinterFileSystem::ParseThumbnail(File &file)
@@ -987,10 +1197,12 @@ bool PrinterFileSystem::ParseThumbnail(File &file, std::istream &is)
     return true;
 }
 
-void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type)
+void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type, int retry)
 {
     json req;
     json arr;
+    if (!m_file_storage.empty())
+        req["storage"] = m_file_storage;
     if (type == OldThumbnail) {
         for (auto &file : *files) arr.push_back(file.name);
         req["files"] = arr;
@@ -1017,7 +1229,12 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             for (auto &path : fails) {
                 auto iter = std::find_if(m_file_list.begin(), m_file_list.end(), [&path](auto &f) { return f.path == path; });
                 if (iter != m_file_list.end()) {
-                    if (type == ModelThumbnail) iter->metadata.clear();
+                    if (type == ModelThumbnail) {
+                        auto source = std::find_if(files->begin(), files->end(),
+                                                   [&path](auto &f) { return f.path == path; });
+                        if (source == files->end() || source->metadata.empty())
+                            iter->metadata.clear();
+                    }
                     iter->flags |= fails.size() == 1 ? FF_THUMNAIL : FF_THUMNAIL_RETRY;
                 }
             }
@@ -1038,8 +1255,18 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         }
         req["paths"] = arr;
     }
+    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE request type=" << type
+                            << " retry=" << retry
+                            << " storage=" << m_file_storage
+                            << " req=" << req.dump();
+
     SendRequest<File>(
         SUB_FILE, req, [type, files](json const &resp, File &file, unsigned char const *data) -> int {
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE response type=" << type
+                                    << " path=" << resp.value("path", "")
+                                    << " thumbnail=" << resp.value("thumbnail", "")
+                                    << " size=" << resp.value("size", 0)
+                                    << " continue=" << resp.value("continue", false);
             // in work thread, continue recv
             // receive data
             wxString        mimetype  = resp.value("mimetype", "");
@@ -1066,7 +1293,12 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     file.local_path = iter->local_path + std::string((char *) data, size);
                 else
                     file.local_path = std::string((char *) data, size);
-                ParseThumbnail(file);
+                bool parsed = ParseThumbnail(file);
+                BOOST_LOG_TRIVIAL(info) << "[StorageTrace] ModelMetadata parsed"
+                                           << " path=" << path
+                                           << " bytes=" << file.local_path.size()
+                                           << " ok=" << parsed
+                                           << " thumbnail=" << file.metadata["Thumbnail"];
             } else {
                 if (mimetype.empty()) {
                     if (subpath.empty()) subpath = thumbnail;
@@ -1092,7 +1324,11 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             file.path = path;
             return 0;
         },
-        [this, files, type](int result, File const &file) {
+        [this, files, type, retry](int result, File const &file) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE callback type=" << type
+                                    << " result=" << result
+                                    << " file=" << file.name
+                                    << " path=" << file.path;
             auto n    = file.name.find_last_of('.');
             auto name  = n == std::string::npos ? file.name : file.name.substr(0, n) + ".mp4";
             n          = (type == ModelMetadata) ? std::string::npos : file.path.find_last_of('#');
@@ -1104,9 +1340,15 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             if (iter != m_file_list.end()) {
                 if (type == ModelMetadata) {
                     iter->metadata = file.metadata;
+                    // Persist phase 1 immediately. If the following thumbnail request
+                    // fails or drops the tunnel, the next session can resume directly
+                    // with ModelThumbnail instead of fetching the five 3MF metadata
+                    // members again.
+                    SaveStorageCache(*iter, false);
                     auto thumbnail = iter->metadata["Thumbnail"];
-                    if (thumbnail.empty())
+                    if (thumbnail.empty()) {
                         iter->flags |= FF_THUMNAIL; // DOTO: retry on fail
+                    }
                     int index       = iter - m_file_list.begin();
                     SendChangedEvent(EVT_THUMBNAIL, index, file.name);
                     if (iter2 != files->end())
@@ -1115,16 +1357,108 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     iter->flags |= FF_THUMNAIL; // DOTO: retry on fail
                     if (file.thumbnail.IsOk()) {
                         iter->thumbnail = file.thumbnail;
+                        File cache_file = *iter;
+                        if (iter2 != files->end())
+                            cache_file.metadata = iter2->metadata;
+                        SaveStorageCache(cache_file, true);
                         int index       = iter - m_file_list.begin();
                         SendChangedEvent(EVT_THUMBNAIL, index, file.name);
                     }
                 }
             }
+            if (result == CONTINUE)
+                return;
+
+            if (result != SUCCESS) {
+                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] thumbnail request error"
+                                           << " type=" << type
+                                           << " result=" << result
+                                           << " retry=" << retry
+                                           << " storage=" << m_file_storage
+                                           << " file=" << file.name
+                                           << " path=" << file.path;
+
+                // A1 may temporarily return FILE_READ_WRITE_ERR while Storage thumbnails
+                // are being fetched quickly. Retry the same request with bounded backoff
+                // instead of immediately advancing and collapsing the file tunnel.
+                const bool retryable = result == FILE_READ_WRITE_ERR ||
+                                       result == ERROR_RES_BUSY ||
+                                       result == ERROR_TIME_OUT;
+                if (retryable && retry < 3) {
+                    if (type == ModelThumbnail || type == FinishThumbnail) {
+                        for (auto &f : *files) {
+                            f.flags &= ~FF_THUMNAIL;
+                            auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                                   [&f](auto &entry) { return entry.path == f.path; });
+                            if (it != m_file_list.end())
+                                it->flags &= ~FF_THUMNAIL;
+                        }
+                    }
+                    const int delay_ms = 500 << retry; // 500, 1000, 2000 ms
+                    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] retrying thumbnail request"
+                                            << " type=" << type
+                                            << " retry=" << (retry + 1)
+                                            << " delay_ms=" << delay_ms;
+                    ScheduleThumbnailUpdate(files, type, retry + 1, delay_ms);
+                    return;
+                }
+
+                if (result == ERROR_PIPE) {
+                    // Keep the failed model unresolved. Reconnect performs LIST_INFO again,
+                    // and the partial metadata cache lets the next attempt resume at the
+                    // thumbnail phase instead of repeating the five-file metadata fetch.
+                    for (auto &f : *files) {
+                        f.flags &= ~(FF_THUMNAIL | FF_THUMNAIL_RETRY);
+                        auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                               [&f](auto &entry) { return entry.path == f.path; });
+                        if (it != m_file_list.end())
+                            it->flags &= ~(FF_THUMNAIL | FF_THUMNAIL_RETRY);
+                    }
+                    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] pipe lost; keeping thumbnail unresolved";
+                    return;
+                }
+
+                // A permanently unreadable thumbnail must not make the whole Storage view
+                // unusable. Mark only this file as handled and continue with the next one.
+                for (auto &f : *files) {
+                    f.flags |= FF_THUMNAIL;
+                    auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                           [&f](auto &entry) { return entry.path == f.path; });
+                    if (it != m_file_list.end())
+                        it->flags |= FF_THUMNAIL;
+                }
+
+                ScheduleThumbnailUpdate(files, FinishThumbnail, 0, 250);
+                return;
+            }
+
             if (iter2 != files->end())
-                iter2->flags |= FF_THUMNAIL; // have received response
-            if (result != CONTINUE)
-                UpdateFocusThumbnail2(files, type == ModelMetadata ? ModelThumbnail : FinishThumbnail);
+                iter2->flags |= FF_THUMNAIL; // have received successful response
+
+            if (type == ModelMetadata) {
+                UpdateFocusThumbnail2(files, ModelThumbnail, 0);
+            } else {
+                // Give the printer a small breather between completed model chains.
+                ScheduleThumbnailUpdate(files, FinishThumbnail, 0, 150);
+            }
         });
+}
+
+void PrinterFileSystem::ScheduleThumbnailUpdate(std::shared_ptr<std::vector<File>> files, int type, int retry, int delay_ms)
+{
+    auto weak = weak_from_this();
+    auto storage = m_file_storage;
+    boost::thread([weak, files, type, retry, delay_ms, storage] {
+        boost::this_thread::sleep(boost::posix_time::milliseconds(delay_ms));
+        auto self = weak.lock();
+        if (!self)
+            return;
+        self->PostCallback([self, files, type, retry, storage] {
+            if (self->m_stopped || self->m_file_type != F_MODEL || self->m_file_storage != storage)
+                return;
+            self->UpdateFocusThumbnail2(files, type, retry);
+        });
+    }).detach();
 }
 
 std::pair<PrinterFileSystem::FileList &, size_t> PrinterFileSystem::FindFile(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path)

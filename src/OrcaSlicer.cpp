@@ -8331,6 +8331,12 @@ extern "C" {
         // Call the UTF8 main.
         return CLI().run(argc, argv_ptrs.data());
     }
+
+    // Entry point expected by the genuine Bambu Studio Windows launcher.
+    __declspec(dllexport) int __stdcall bambustu_main(int argc, wchar_t **argv)
+    {
+        return orcaslicer_main(argc, argv);
+    }
 }
 #else /* _MSC_VER */
 int main(int argc, char **argv)

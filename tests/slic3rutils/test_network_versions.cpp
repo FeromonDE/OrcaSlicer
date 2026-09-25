@@ -74,7 +74,8 @@ TEST_CASE("Series and managed classification", "[NetworkVersions]")
 
 TEST_CASE_METHOD(PluginFolderFixture, "Managed builds fold into the series; customs are surfaced", "[NetworkVersions]")
 {
-    add_plugin("02.08.01.55");          // managed, same series -> folded into the 02.08.01 row
+    add_plugin("02.08.02.54");          // managed, latest series -> folded into the 02.08.02 row
+    add_plugin("02.08.01.55");          // managed, previous series -> folded into the 02.08.01 row
     add_plugin("02.09.00.10");          // managed, unknown series -> not listed
     add_plugin("02.03.00.62");          // managed, older whitelisted series -> folded into 02.03.00
     add_plugin("02.01.01.52");          // managed, series with no ABI in this build -> not listed
@@ -84,6 +85,8 @@ TEST_CASE_METHOD(PluginFolderFixture, "Managed builds fold into the series; cust
     auto versions = get_all_available_versions();
 
     // The specific managed build never gets its own row - the series represents it.
+    REQUIRE(count_version(versions, "02.08.02.54") == 0);
+    REQUIRE(count_version(versions, "02.08.02")    == 1);
     REQUIRE(count_version(versions, "02.08.01.55") == 0);
     REQUIRE(count_version(versions, "02.08.01")    == 1);
     REQUIRE(count_version(versions, "02.09.00.10") == 0);
@@ -94,32 +97,36 @@ TEST_CASE_METHOD(PluginFolderFixture, "Managed builds fold into the series; cust
     REQUIRE(count_version(versions, "02.08.01_custom")  == 1);
     REQUIRE(count_version(versions, "02.08.01.52-dev")  == 1);
 
-    // Newest series first, its customs nested under it (suffix sort: "" < ".52-dev" < "_custom"),
-    // then older series, legacy last.
-    REQUIRE(versions[0].version == "02.08.01");
-    REQUIRE(versions[1].version == "02.08.01.52-dev");
-    REQUIRE(versions[2].version == "02.08.01_custom");
-    REQUIRE(versions[3].version == "02.03.00");
+    // Newest series first. Customs stay nested under the 02.08.01 series
+    // (suffix sort: "" < ".52-dev" < "_custom"), then older series, legacy last.
+    REQUIRE(versions[0].version == "02.08.02");
+    REQUIRE(versions[1].version == "02.08.01");
+    REQUIRE(versions[2].version == "02.08.01.52-dev");
+    REQUIRE(versions[3].version == "02.08.01_custom");
+    REQUIRE(versions[4].version == "02.03.00");
     REQUIRE(versions.back().version == BAMBU_NETWORK_AGENT_VERSION_LEGACY);
 
-    // An older whitelisted series is a flat row of its own, and never holds "(Latest)".
-    REQUIRE(versions[3].suffix.empty());
-    REQUIRE_FALSE(versions[3].is_latest);
+    // Older whitelisted series are flat rows of their own and never hold "(Latest)".
+    REQUIRE(versions[1].suffix.empty());
+    REQUIRE_FALSE(versions[1].is_latest);
+    REQUIRE(versions[4].suffix.empty());
+    REQUIRE_FALSE(versions[4].is_latest);
 
     // Customs sort/render nested under their series (non-empty suffix, base = the series).
-    REQUIRE(versions[1].base_version == "02.08.01");
-    REQUIRE_FALSE(versions[1].suffix.empty());
     REQUIRE(versions[2].base_version == "02.08.01");
     REQUIRE_FALSE(versions[2].suffix.empty());
+    REQUIRE(versions[3].base_version == "02.08.01");
+    REQUIRE_FALSE(versions[3].suffix.empty());
 
-    // "(Latest)" is the series row, never a nested custom build.
+    // "(Latest)" is the 02.08.02 series row, never an older or nested custom build.
     REQUIRE(versions[0].suffix.empty());
     REQUIRE(versions[0].is_latest);
     REQUIRE_FALSE(versions[1].is_latest);
     REQUIRE_FALSE(versions[2].is_latest);
+    REQUIRE_FALSE(versions[3].is_latest);
 
-    // The stored default that drives download and update-check decisions is now the series.
-    REQUIRE(std::string(get_latest_network_version()) == "02.08.01");
+    // The stored default that drives download and update-check decisions is the newest supported series.
+    REQUIRE(std::string(get_latest_network_version()) == "02.08.02");
 }
 
 TEST_CASE_METHOD(PluginFolderFixture, "Only the loaded series is marked installed", "[NetworkVersions]")
@@ -163,6 +170,9 @@ TEST_CASE_METHOD(PluginFolderFixture, "Only the loaded series is marked installe
 TEST_CASE("Only whitelisted series pass the load gate", "[NetworkVersions]")
 {
     // Each whitelisted series, its builds, and custom-named builds of that series.
+    REQUIRE(is_supported_network_version("02.08.02"));
+    REQUIRE(is_supported_network_version("02.08.02.54"));
+    REQUIRE(is_supported_network_version("02.08.02_custom"));
     REQUIRE(is_supported_network_version("02.08.01"));
     REQUIRE(is_supported_network_version("02.08.01.52"));
     REQUIRE(is_supported_network_version("02.08.01.55"));
@@ -194,6 +204,9 @@ TEST_CASE("Each version resolves to the ABI generation that can call it", "[Netw
 {
     // The generation is keyed on the series, so every build of a series - including the
     // custom-named ones - resolves to the same one.
+    CHECK(network_plugin_abi("02.08.02")        == NetworkAbi::V020802);
+    CHECK(network_plugin_abi("02.08.02.54")     == NetworkAbi::V020802);
+    CHECK(network_plugin_abi("02.08.02_custom") == NetworkAbi::V020802);
     CHECK(network_plugin_abi("02.08.01")        == NetworkAbi::Current);
     CHECK(network_plugin_abi("02.08.01.55")     == NetworkAbi::Current);
     CHECK(network_plugin_abi("02.08.01.52-dev") == NetworkAbi::Current);
@@ -230,7 +243,7 @@ TEST_CASE_METHOD(PluginFolderFixture, "Legacy series never adopts discovered bui
     // With nothing else on disk, the series holds "(Latest)" even though its library is
     // not installed.
     for (const auto& info : versions) {
-        if (info.version == "02.08.01") {
+        if (info.version == "02.08.02") {
             REQUIRE(info.is_latest);
             REQUIRE_FALSE(info.is_loaded);
         }
