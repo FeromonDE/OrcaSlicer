@@ -21,6 +21,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <cctype>
 #include <cstring>
 
 #ifndef NDEBUG
@@ -1760,6 +1761,11 @@ boost::uint32_t PrinterFileSystem::RequestMediaAbility(int api_version)
 
 void PrinterFileSystem::RequestUploadFile()
 {
+    if (m_use_ftps) {
+        RequestFtpsUpload();
+        return;
+    }
+
     if (!m_upload_file) {
         return;
     }
@@ -1920,6 +1926,11 @@ void PrinterFileSystem::CancelUploadTask(bool send_cancel_req)
     if (!m_upload_file)
         return;
 
+    if (m_use_ftps) {
+        CancelRequests2({m_upload_seq});
+        return;
+    }
+
     {
         boost::unique_lock l(m_mutex);
         if (m_produce_message_cb_map.find(m_upload_seq) != m_produce_message_cb_map.end())
@@ -1935,6 +1946,487 @@ void PrinterFileSystem::CancelUploadTask(bool send_cancel_req)
     } else {
         CancelRequests2({m_upload_seq});
     }
+}
+
+bool PrinterFileSystem::EnsureFtpsStorage(std::string &prefix, std::string &label, std::string &error)
+{
+    std::string host;
+    std::string user;
+    std::string password;
+    {
+        boost::unique_lock lock(m_ftps_mutex);
+        if (!m_ftps_storage_label.empty()) {
+            prefix = m_ftps_prefix;
+            label = m_ftps_storage_label;
+            error.clear();
+            return true;
+        }
+        host = m_ftps_host;
+        user = m_ftps_user;
+        password = m_ftps_password;
+    }
+
+    BambuFtps::Client client(host, user, password);
+    if (!client.ready()) {
+        error = "FTPS endpoint is incomplete";
+        return false;
+    }
+
+    struct Candidate {
+        char const *path;
+        char const *label;
+    };
+    static constexpr Candidate candidates[] = {
+        {"/sdcard", "sdcard"},
+        {"/usb", "udisk"},
+        {"/", "udisk"},
+    };
+
+    std::string last_error;
+    for (auto const &candidate : candidates) {
+        std::vector<BambuFtps::Entry> entries;
+        std::string current_error = client.list(candidate.path, entries);
+        if (current_error.empty()) {
+            prefix = candidate.path;
+            label = candidate.label;
+            {
+                boost::unique_lock lock(m_ftps_mutex);
+                m_ftps_prefix = prefix;
+                m_ftps_storage_label = label;
+            }
+            BOOST_LOG_TRIVIAL(info) << "[StorageFTPS] storage root=" << prefix
+                                    << " label=" << label;
+            error.clear();
+            return true;
+        }
+        last_error = current_error;
+    }
+
+    error = last_error.empty() ? "No accessible FTPS storage root" : last_error;
+    BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] storage probe failed: " << error;
+    return false;
+}
+
+bool PrinterFileSystem::IsFtpsCancelled(boost::uint32_t seq)
+{
+    boost::unique_lock lock(m_ftps_mutex);
+    return m_ftps_cancelled.find(seq) != m_ftps_cancelled.end();
+}
+
+void PrinterFileSystem::FinishFtpsRequest(boost::uint32_t seq)
+{
+    boost::unique_lock lock(m_ftps_mutex);
+    m_ftps_active.erase(seq);
+    m_ftps_cancelled.erase(seq);
+}
+
+boost::uint32_t PrinterFileSystem::SendFtpsRequest(int type, json const &req,
+                                                   callback_t2 const &callback,
+                                                   const std::string &param)
+{
+    const boost::uint32_t seq = m_ftps_sequence.fetch_add(1);
+    {
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_active.insert(seq);
+    }
+
+    boost::thread worker([w = weak_from_this(), seq, type, req, callback, param] {
+        if (auto self = w.lock())
+            self->DispatchFtpsRequest(seq, type, req, callback, param);
+    });
+    worker.detach();
+    return seq;
+}
+
+void PrinterFileSystem::DispatchFtpsRequest(boost::uint32_t seq, int type,
+                                            json const &req,
+                                            callback_t2 const &callback,
+                                            const std::string &param)
+{
+    (void)param;
+
+    auto finish = [this, seq, &callback](int result, json const &resp,
+                                         unsigned char const *data) {
+        if (callback)
+            callback(result, resp, data);
+        FinishFtpsRequest(seq);
+    };
+
+    if (IsFtpsCancelled(seq)) {
+        finish(ERROR_CANCEL, json::object(), nullptr);
+        return;
+    }
+
+    std::string host;
+    std::string user;
+    std::string password;
+    {
+        boost::unique_lock lock(m_ftps_mutex);
+        host = m_ftps_host;
+        user = m_ftps_user;
+        password = m_ftps_password;
+    }
+
+    BambuFtps::Client client(host, user, password);
+    std::string prefix;
+    std::string storage_label;
+    std::string error;
+    if (!EnsureFtpsStorage(prefix, storage_label, error)) {
+        BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] request " << type
+                                   << " failed before dispatch: " << error;
+        finish(STORAGE_UNAVAILABLE, json::object(), nullptr);
+        return;
+    }
+
+    if (type == REQUEST_MEDIA_ABILITY) {
+        json resp;
+        resp["storage"] = json::array({storage_label});
+        finish(SUCCESS, resp, nullptr);
+        return;
+    }
+
+    if (type == LIST_INFO) {
+        const std::string requested_storage = req.value("storage", std::string());
+        if (requested_storage == "internal" || requested_storage == "emmc") {
+            json resp;
+            resp["file_lists"] = json::array();
+            finish(SUCCESS, resp, nullptr);
+            return;
+        }
+
+        const std::string file_type = req.value("type", std::string("model"));
+        const std::string directory = ftps_subtree(prefix, file_type);
+        std::vector<BambuFtps::Entry> entries;
+        error = client.list(directory, entries);
+        if (!error.empty()) {
+            BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] LIST " << directory
+                                       << " failed: " << error;
+            finish(STORAGE_UNAVAILABLE, json::object(), nullptr);
+            return;
+        }
+
+        json files = json::array();
+        for (auto const &entry : entries) {
+            if (entry.is_dir || !ftps_keep_file(file_type, entry.name))
+                continue;
+            json file;
+            file["name"] = entry.name;
+            file["path"] = ftps_join_path(directory, entry.name);
+            file["size"] = entry.size;
+            file["time"] = entry.mtime;
+            files.push_back(std::move(file));
+        }
+
+        json resp;
+        resp["file_lists"] = std::move(files);
+        BOOST_LOG_TRIVIAL(info) << "[StorageFTPS] LIST_INFO type=" << file_type
+                                << " path=" << directory
+                                << " files=" << resp["file_lists"].size();
+        finish(SUCCESS, resp, nullptr);
+        return;
+    }
+
+    if (type == SUB_FILE) {
+        if (!req.contains("paths") || !req["paths"].is_array() || req["paths"].empty()) {
+            finish(FILE_TYPE_ERR, json::object(), nullptr);
+            return;
+        }
+
+        const std::string requested = req["paths"].front().get<std::string>();
+        const std::string archive_path = ftps_base_path(requested);
+        const bool zip_request = req.value("zip", false);
+
+        std::shared_ptr<std::string> archive;
+        {
+            boost::unique_lock lock(m_ftps_mutex);
+            auto iter = m_ftps_archive_cache.find(archive_path);
+            if (iter != m_ftps_archive_cache.end())
+                archive = iter->second;
+        }
+
+        if (!archive) {
+            archive = std::make_shared<std::string>();
+            error = client.retrieve(
+                archive_path,
+                [archive](void const *data, size_t size) {
+                    archive->append(static_cast<char const *>(data), size);
+                    return true;
+                },
+                [this, seq](std::uint64_t, std::uint64_t) {
+                    return !IsFtpsCancelled(seq);
+                });
+            if (!error.empty()) {
+                const int result = IsFtpsCancelled(seq) || error == "cancelled"
+                    ? ERROR_CANCEL : FILE_READ_WRITE_ERR;
+                BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] RETR " << archive_path
+                                           << " failed: " << error;
+                finish(result, json::object(), nullptr);
+                return;
+            }
+        }
+
+        if (zip_request) {
+            // The native :6000 service synthesizes a partial zip containing the
+            // requested members. Returning the complete 3MF is equivalent for
+            // Orca's parser and avoids five separate FTPS downloads.
+            if (req["paths"].size() == 5) {
+                boost::unique_lock lock(m_ftps_mutex);
+                m_ftps_archive_cache[archive_path] = archive;
+            }
+
+            json resp;
+            resp["size"] = archive->size();
+            resp["path"] = archive_path;
+            resp["thumbnail"] = boost::filesystem::path(archive_path).filename().string();
+            resp["continue"] = false;
+            finish(SUCCESS, resp,
+                   reinterpret_cast<unsigned char const *>(archive->data()));
+            return;
+        }
+
+        const std::string member = ftps_sub_path(requested);
+        if (member.empty()) {
+            finish(FILE_TYPE_ERR, json::object(), nullptr);
+            return;
+        }
+
+        std::string extracted;
+        if (!ftps_extract_zip_entry(*archive, member, extracted)) {
+            BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] 3MF member not found: "
+                                       << archive_path << "#" << member;
+            finish(FILE_NO_EXIST, json::object(), nullptr);
+            return;
+        }
+
+        {
+            boost::unique_lock lock(m_ftps_mutex);
+            m_ftps_archive_cache.erase(archive_path);
+        }
+
+        json resp;
+        resp["size"] = extracted.size();
+        resp["path"] = requested;
+        resp["thumbnail"] = boost::filesystem::path(member).filename().string();
+        resp["continue"] = false;
+        const std::string ext = boost::filesystem::path(member).extension().string();
+        if (boost::iequals(ext, ".png"))
+            resp["mimetype"] = "image/png";
+        else if (boost::iequals(ext, ".jpg") || boost::iequals(ext, ".jpeg"))
+            resp["mimetype"] = "image/jpeg";
+
+        finish(SUCCESS, resp,
+               reinterpret_cast<unsigned char const *>(extracted.data()));
+        return;
+    }
+
+    if (type == FILE_DOWNLOAD) {
+        std::string remote = req.value("path", std::string());
+        if (remote.empty()) {
+            const std::string name = req.value("file", std::string());
+            const char *types[] = {"timelapse", "video", "model"};
+            const int ft = std::max(0, std::min(static_cast<int>(m_file_type), 2));
+            remote = ftps_join_path(ftps_subtree(prefix, types[ft]), name);
+        }
+
+        std::uint64_t total = 0;
+        error = client.size(remote, total);
+        if (!error.empty()) {
+            BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] SIZE " << remote
+                                       << " failed: " << error;
+            finish(FILE_SIZE_ERR, json::object(), nullptr);
+            return;
+        }
+
+        boost::uuids::detail::md5 md5;
+        std::uint64_t offset = 0;
+        bool translator_failed = false;
+        error = client.retrieve(
+            remote,
+            [this, seq, &callback, &md5, &offset, total, &translator_failed](void const *data, size_t size) {
+                if (IsFtpsCancelled(seq))
+                    return false;
+                json resp;
+                resp["offset"] = offset;
+                resp["total"] = total;
+                resp["size"] = size;
+                resp["file_md5"] = "";
+                const int cb_result = callback
+                    ? callback(CONTINUE, resp, reinterpret_cast<unsigned char const *>(data))
+                    : CONTINUE;
+                if (cb_result != CONTINUE) {
+                    translator_failed = true;
+                    return false;
+                }
+                md5.process_bytes(data, size);
+                offset += size;
+                return true;
+            },
+            [this, seq](std::uint64_t, std::uint64_t) {
+                return !IsFtpsCancelled(seq);
+            });
+
+        if (translator_failed) {
+            FinishFtpsRequest(seq);
+            return;
+        }
+        if (!error.empty()) {
+            const int result = IsFtpsCancelled(seq) || error == "cancelled"
+                ? ERROR_CANCEL : FILE_READ_WRITE_ERR;
+            finish(result, json::object(), nullptr);
+            return;
+        }
+
+        json resp;
+        resp["offset"] = offset;
+        resp["total"] = total;
+        resp["size"] = 0;
+        resp["file_md5"] = storage_md5_hex(md5);
+        static unsigned char dummy = 0;
+        finish(SUCCESS, resp, &dummy);
+        return;
+    }
+
+    if (type == FILE_DEL) {
+        std::vector<std::string> paths;
+        if (req.contains("paths") && req["paths"].is_array()) {
+            for (auto const &item : req["paths"])
+                paths.push_back(item.get<std::string>());
+        } else if (req.contains("delete") && req["delete"].is_array()) {
+            const char *types[] = {"timelapse", "video", "model"};
+            const int ft = std::max(0, std::min(static_cast<int>(m_file_type), 2));
+            const std::string directory = ftps_subtree(prefix, types[ft]);
+            for (auto const &item : req["delete"])
+                paths.push_back(ftps_join_path(directory, item.get<std::string>()));
+        }
+
+        for (auto const &path : paths) {
+            if (IsFtpsCancelled(seq)) {
+                finish(ERROR_CANCEL, json::object(), nullptr);
+                return;
+            }
+            error = client.remove(path);
+            if (!error.empty()) {
+                BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] DELE " << path
+                                           << " failed: " << error;
+                finish(FILE_READ_WRITE_ERR, json::object(), nullptr);
+                return;
+            }
+        }
+
+        finish(SUCCESS, json::object(), nullptr);
+        return;
+    }
+
+    if (type == TASK_CANCEL) {
+        if (req.contains("tasks") && req["tasks"].is_array()) {
+            boost::unique_lock lock(m_ftps_mutex);
+            for (auto const &task : req["tasks"])
+                m_ftps_cancelled.insert(task.get<boost::uint32_t>());
+        }
+        json resp;
+        resp["tasks"] = req.value("tasks", json::array());
+        finish(SUCCESS, resp, nullptr);
+        return;
+    }
+
+    // FTPS mode is deliberately exclusive. Unsupported browser operations
+    // fail here and are never forwarded to the :6000 backend.
+    BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] unsupported request type=" << type;
+    finish(API_VERSION_UNSUPPORT, json::object(), nullptr);
+}
+
+void PrinterFileSystem::RequestFtpsUpload()
+{
+    std::shared_ptr<UploadFile> upload_file;
+    {
+        boost::unique_lock lock(m_mutex);
+        upload_file = m_upload_file;
+    }
+    if (!upload_file)
+        return;
+
+    const boost::uint32_t seq = m_ftps_sequence.fetch_add(1);
+    m_upload_seq = seq;
+    upload_file->flags |= FF_UPLOADING;
+    {
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_active.insert(seq);
+    }
+
+    boost::thread worker([w = weak_from_this(), seq, upload_file] {
+        auto self = w.lock();
+        if (!self)
+            return;
+
+        std::string prefix;
+        std::string label;
+        std::string error;
+        if (!self->EnsureFtpsStorage(prefix, label, error)) {
+            self->SendChangedEvent(EVT_UPLOAD_CHANGED, FF_UPLOADCANCEL, error,
+                                   STORAGE_UNAVAILABLE);
+            self->FinishFtpsRequest(seq);
+            return;
+        }
+
+        if (upload_file->select_storage == "internal" ||
+            upload_file->select_storage == "emmc") {
+            self->SendChangedEvent(EVT_UPLOAD_CHANGED, FF_UPLOADCANCEL,
+                                   "FTPS exposes external storage only.",
+                                   STORAGE_UNAVAILABLE);
+            self->FinishFtpsRequest(seq);
+            return;
+        }
+
+        std::string host;
+        std::string user;
+        std::string password;
+        {
+            boost::unique_lock lock(self->m_ftps_mutex);
+            host = self->m_ftps_host;
+            user = self->m_ftps_user;
+            password = self->m_ftps_password;
+        }
+        BambuFtps::Client client(host, user, password);
+        const std::string remote = ftps_join_path(prefix, upload_file->name);
+        error = client.upload(
+            upload_file->path, remote,
+            [self, seq, upload_file](std::uint64_t now, std::uint64_t total) {
+                if (self->IsFtpsCancelled(seq))
+                    return false;
+                upload_file->size = static_cast<boost::uint32_t>(
+                    std::min<std::uint64_t>(now, std::numeric_limits<boost::uint32_t>::max()));
+                const int progress = total
+                    ? static_cast<int>(std::min<std::uint64_t>(99, now * 100 / total))
+                    : 0;
+                self->SendChangedEvent(EVT_UPLOADING, progress);
+                return true;
+            });
+
+        const bool cancelled = self->IsFtpsCancelled(seq) || error == "cancelled";
+        if (error.empty()) {
+            upload_file->flags &= ~FF_UPLOADING;
+            upload_file->flags |= FF_UPLOADDONE;
+            self->SendChangedEvent(EVT_UPLOADING, 100);
+            self->SendChangedEvent(EVT_UPLOAD_CHANGED, FF_UPLOADDONE);
+            self->PostCallback([w] {
+                if (auto fs = w.lock())
+                    fs->ListAllFiles();
+            });
+        } else {
+            upload_file->flags &= ~FF_UPLOADING;
+            upload_file->flags |= FF_UPLOADCANCEL;
+            self->SendChangedEvent(EVT_UPLOAD_CHANGED, FF_UPLOADCANCEL, error,
+                                   cancelled ? ERROR_CANCEL : SEND_ERR);
+        }
+
+        {
+            boost::unique_lock lock(self->m_mutex);
+            if (self->m_upload_file == upload_file)
+                self->m_upload_file.reset();
+        }
+        self->FinishFtpsRequest(seq);
+    });
+    worker.detach();
 }
 
 boost::uint32_t PrinterFileSystem::SendRequest(int type, json const &req, callback_t2 const &callback,const std::string& param)
