@@ -1,0 +1,176 @@
+name: Build Windows x64 Fast Installer
+
+on:
+  pull_request:
+    branches:
+      - main
+      - release/*
+    paths:
+      - 'src/**'
+      - '**/CMakeLists.txt'
+      - 'version.inc'
+      - 'build_win.bat'
+      - 'scripts/build_preset_cache.*'
+      - '.github/workflows/build_windows_fast.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: fast-windows-installer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_fast_installer:
+    name: Fast Windows x64 installer
+    if: ${{ github.event_name != 'pull_request' || github.head_ref == 'bambu-signed-host' }}
+    runs-on: windows-latest
+    env:
+      BUILD_DIR: build
+      ORCA_UPDATER_SIG_KEY: ${{ secrets.ORCA_UPDATER_SIG_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: Restore dependency cache
+        id: deps_cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: windows-x64-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
+          fail-on-cache-miss: true
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+          useCloudCache: true
+
+      - name: Set build metadata
+        shell: pwsh
+        run: |
+          $sha = if ("${{ github.event_name }}" -eq "pull_request") {
+            "${{ github.event.pull_request.head.sha }}"
+          } else {
+            "${{ github.sha }}"
+          }
+          "git_commit_hash=$sha" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Name compiler cache
+        shell: bash
+        run: |
+          vswhere='/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
+          toolset=$(tr -d '\r\n' < "$("$vswhere" -latest -products '*' -find 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt' | tr -d '\r')")
+          cl=$("$vswhere" -latest -products '*' -find 'VC\Tools\MSVC\'"$toolset"'\**\cl.exe' | tr -d '\r' | head -1)
+          leg="Windows-x64-clang-vc$("$cl" 2>&1 | grep -o -E 'Version [0-9.]+' | cut -d' ' -f2)"
+          echo "CCACHE_LEG=$leg" >> "$GITHUB_ENV"
+          echo "CCACHE_ENTRY=ccache-$leg-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+
+      - name: Install compiler cache
+        id: ccache
+        continue-on-error: true
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ env.CCACHE_LEG }}
+          max-size: 3G
+          restore: false
+          save: false
+          job-summary: ''
+
+      - name: Restore compiler cache
+        id: ccache_restore
+        if: ${{ steps.ccache.outcome == 'success' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.CCACHE_ENTRY }}
+          restore-keys: |
+            ccache-${{ env.CCACHE_LEG }}-
+
+      - name: Enable compiler cache
+        if: ${{ steps.ccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime" >> "$GITHUB_ENV"
+          echo "CCACHE_DEPEND=1" >> "$GITHUB_ENV"
+          ccache -z
+
+      - name: Setup MSVC
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $nsisDir = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS'
+          $makensis = Join-Path $nsisDir 'makensis.exe'
+          for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
+            if ($attempt -gt 1) { Start-Sleep -Seconds (10 * $attempt) }
+            choco install nsis --yes --no-progress
+          }
+          if (-not (Test-Path $makensis)) {
+            throw "NSIS install failed: $makensis not found."
+          }
+          $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+
+      - name: Build OrcaSlicer
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          $deps = (Split-Path "${{ github.workspace }}/deps/build/OrcaSlicer_dep").Replace('\', '/')
+          .\build_win.bat -s -i --arch x64 --build-dir $env:BUILD_DIR --deps-dir $deps -l -x
+
+      - name: Build system preset cache
+        shell: cmd
+        run: scripts\build_preset_cache.bat --prune-source "%BUILD_DIR%" "resources\profiles" "%BUILD_DIR%\OrcaSlicer\resources\profiles"
+
+      - name: Create NSIS installer
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}
+        shell: pwsh
+        run: cpack -G NSIS
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: OrcaSlicer_Windows_Fast_Installer_x64
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer*.exe
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Compiler cache statistics
+        if: ${{ always() && steps.ccache.outcome == 'success' }}
+        shell: bash
+        run: |
+          ccache --evict-older-than 7d
+          ccache -s -v || ccache -s
+
+      - name: Save compiler cache
+        id: ccache_save
+        if: ${{ always() && steps.ccache_restore.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ env.CCACHE_ENTRY }}
+
+      - name: Drop older compiler caches
+        if: ${{ always() && steps.ccache_save.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh cache list --ref "$GITHUB_REF" --key "$CCACHE_ENTRY" --json key \
+              | jq -e --arg entry "$CCACHE_ENTRY" 'any(.[]; .key == $entry)' > /dev/null; then
+            exit 0
+          fi
+          gh cache list --ref "$GITHUB_REF" --key "ccache-$CCACHE_LEG-" --limit 100 --json id,key \
+            | jq -r --arg prefix "ccache-$CCACHE_LEG-" --argjson run "$GITHUB_RUN_ID" \
+                '.[] | select((.key | ltrimstr($prefix) | split("-")[0] | tonumber?) < $run) | .id' \
+            | tr -d '\r' \
+            | while read -r id; do gh cache delete "$id"; done

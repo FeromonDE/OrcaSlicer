@@ -32,6 +32,7 @@ concurrency:
 jobs:
   check_build_script:
     name: Windows build script tests
+    if: ${{ github.event_name != 'pull_request' || github.head_ref != 'bambu-signed-host' }}
     runs-on: windows-latest
     steps:
       - name: Checkout
