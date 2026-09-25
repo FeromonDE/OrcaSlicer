@@ -13,8 +13,11 @@
 #include "nlohmann/json_fwd.hpp"
 using nlohmann::json;
 
-#include <functional>
+#include <atomic>
 #include <deque>
+#include <functional>
+#include <map>
+#include <set>
 
 wxDECLARE_EVENT(EVT_STATUS_CHANGED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_MODE_CHANGED, wxCommandEvent);
@@ -243,6 +246,12 @@ public:
 
     void SetCacheScope(std::string const &printer_id);
 
+    // Storage transport is an explicit either/or choice. Native :6000 remains
+    // the default; when enabled, all file-browser operations use FTPS :990.
+    void SetUseFtps(bool enabled);
+    bool UseFtps() const { return m_use_ftps; }
+    void SetFtpsEndpoint(std::string const &host, std::string const &user, std::string const &password);
+
     void Stop(bool quit = false);
 
     boost::uint32_t RequestMediaAbility(int api_version);
@@ -303,6 +312,13 @@ private:
     typedef std::function<int(int, json const &resp, unsigned char const *data)> callback_t2;
 
     typedef std::function<int(std::string &msg)> callback_t3;
+
+    boost::uint32_t SendFtpsRequest(int type, json const &req, callback_t2 const &callback, const std::string &param);
+    void DispatchFtpsRequest(boost::uint32_t seq, int type, json const &req, callback_t2 const &callback, const std::string &param);
+    bool EnsureFtpsStorage(std::string &prefix, std::string &label, std::string &error);
+    bool IsFtpsCancelled(boost::uint32_t seq);
+    void FinishFtpsRequest(boost::uint32_t seq);
+    void RequestFtpsUpload();
 
     template<typename T> boost::uint32_t SendRequest(int type, json const &req, Translator<T> const &translator, Callback<T> const &callback, const std::string &param = "")
     {
@@ -394,6 +410,18 @@ private:
     size_t m_lock_end   = 0;
     int m_task_flags = 0;
     std::string m_cache_scope;
+
+    bool m_use_ftps = false;
+    std::string m_ftps_host;
+    std::string m_ftps_user{"bblp"};
+    std::string m_ftps_password;
+    std::string m_ftps_prefix;
+    std::string m_ftps_storage_label;
+    std::atomic<boost::uint32_t> m_ftps_sequence{1};
+    boost::mutex m_ftps_mutex;
+    std::set<boost::uint32_t> m_ftps_active;
+    std::set<boost::uint32_t> m_ftps_cancelled;
+    std::map<std::string, std::shared_ptr<std::string>> m_ftps_archive_cache;
 
     std::vector<bool> m_download_states;
 
