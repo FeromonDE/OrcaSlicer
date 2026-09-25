@@ -1008,7 +1008,7 @@ bool PrinterFileSystem::ParseThumbnail(File &file, std::istream &is)
     return true;
 }
 
-void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type)
+void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type, int retry)
 {
     json req;
     json arr;
@@ -1062,6 +1062,7 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         req["paths"] = arr;
     }
     BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE request type=" << type
+                            << " retry=" << retry
                             << " storage=" << m_file_storage
                             << " req=" << req.dump();
 
@@ -1129,7 +1130,7 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             file.path = path;
             return 0;
         },
-        [this, files, type](int result, File const &file) {
+        [this, files, type, retry](int result, File const &file) {
             BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE callback type=" << type
                                     << " result=" << result
                                     << " file=" << file.name
@@ -1161,23 +1162,91 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                     }
                 }
             }
-            if (iter2 != files->end())
-                iter2->flags |= FF_THUMNAIL; // have received response
             if (result == CONTINUE)
                 return;
+
             if (result != SUCCESS) {
-                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] stopping thumbnail chain after error"
+                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] thumbnail request error"
                                            << " type=" << type
                                            << " result=" << result
+                                           << " retry=" << retry
                                            << " storage=" << m_file_storage
                                            << " file=" << file.name
                                            << " path=" << file.path;
-                // Diagnostic circuit breaker: do not immediately hammer the printer
-                // with the next SUB_FILE after an I/O/pipe error.
+
+                // A1 may temporarily return FILE_READ_WRITE_ERR while Storage thumbnails
+                // are being fetched quickly. Retry the same request with bounded backoff
+                // instead of immediately advancing and collapsing the file tunnel.
+                const bool retryable = result == FILE_READ_WRITE_ERR ||
+                                       result == ERROR_RES_BUSY ||
+                                       result == ERROR_TIME_OUT;
+                if (retryable && retry < 3) {
+                    if (type == ModelThumbnail || type == FinishThumbnail) {
+                        for (auto &f : *files) {
+                            f.flags &= ~FF_THUMNAIL;
+                            auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                                   [&f](auto &entry) { return entry.path == f.path; });
+                            if (it != m_file_list.end())
+                                it->flags &= ~FF_THUMNAIL;
+                        }
+                    }
+                    const int delay_ms = 500 << retry; // 500, 1000, 2000 ms
+                    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] retrying thumbnail request"
+                                            << " type=" << type
+                                            << " retry=" << (retry + 1)
+                                            << " delay_ms=" << delay_ms;
+                    ScheduleThumbnailUpdate(files, type, retry + 1, delay_ms);
+                    return;
+                }
+
+                // A permanently unreadable thumbnail must not make the whole Storage view
+                // unusable. Mark only this file as handled and continue with the next one.
+                for (auto &f : *files) {
+                    f.flags |= FF_THUMNAIL;
+                    auto it = std::find_if(m_file_list.begin(), m_file_list.end(),
+                                           [&f](auto &entry) { return entry.path == f.path; });
+                    if (it != m_file_list.end())
+                        it->flags |= FF_THUMNAIL;
+                }
+
+                if (result == ERROR_PIPE) {
+                    // Let the existing reconnect machinery restore the tunnel. A new focus
+                    // update will resume unresolved files once the connection is usable.
+                    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] pipe lost; waiting for reconnect";
+                    return;
+                }
+
+                ScheduleThumbnailUpdate(files, FinishThumbnail, 0, 250);
                 return;
             }
-            UpdateFocusThumbnail2(files, type == ModelMetadata ? ModelThumbnail : FinishThumbnail);
+
+            if (iter2 != files->end())
+                iter2->flags |= FF_THUMNAIL; // have received successful response
+
+            if (type == ModelMetadata) {
+                UpdateFocusThumbnail2(files, ModelThumbnail, 0);
+            } else {
+                // Give the printer a small breather between completed model chains.
+                ScheduleThumbnailUpdate(files, FinishThumbnail, 0, 150);
+            }
         });
+}
+
+void PrinterFileSystem::ScheduleThumbnailUpdate(std::shared_ptr<std::vector<File>> files, int type, int retry, int delay_ms)
+{
+    auto weak = weak_from_this();
+    auto storage = m_file_storage;
+    boost::thread([weak, files, type, retry, delay_ms, storage] {
+        boost::this_thread::sleep(boost::posix_time::milliseconds(delay_ms));
+        auto self = weak.lock();
+        if (!self)
+            return;
+        self->PostCallback([self, files, type, retry, storage] {
+            if (self->m_stopped || self->m_file_type != F_MODEL || self->m_file_storage != storage)
+                return;
+            self->UpdateFocusThumbnail2(files, type, retry);
+        });
+    }).detach();
 }
 
 std::pair<PrinterFileSystem::FileList &, size_t> PrinterFileSystem::FindFile(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path)
