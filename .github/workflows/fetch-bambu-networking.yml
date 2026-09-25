@@ -1,9 +1,9 @@
 name: Fetch Bambu networking DLL
 
 on:
-  push:
+  pull_request:
     branches:
-      - chatgpt/fetch-bambu-networking-28261
+      - main
   workflow_dispatch:
 
 permissions:
