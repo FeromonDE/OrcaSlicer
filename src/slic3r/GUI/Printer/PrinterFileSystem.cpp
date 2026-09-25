@@ -21,8 +21,10 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <limits>
 
 #ifndef NDEBUG
 //#define PRINTER_FILE_SYSTEM_TEST
@@ -1000,8 +1002,15 @@ void PrinterFileSystem::DeleteFilesContinue()
     auto type = std::make_pair(m_file_type, m_file_storage);
     SendRequest<Void>(
         FILE_DEL, req, nullptr,
-        [indexes, type, names = paths.empty() ? names : paths, bypath = !paths.empty(), this](int, Void const &) {
-            // TODO:
+        [indexes, type, names = paths.empty() ? names : paths, bypath = !paths.empty(), this](int result, Void const &) {
+            if (result != SUCCESS) {
+                for (auto index : indexes)
+                    if (index < m_file_list.size())
+                        m_file_list[index].flags &= ~FF_DELETED;
+                m_task_flags &= ~FF_DELETED;
+                SendChangedEvent(EVT_FILE_CHANGED);
+                return;
+            }
             for (size_t i = indexes.size() - 1; i != size_t(-1); --i)
                 FileRemoved(type, indexes[i], names[i], bypath);
             SendChangedEvent(EVT_FILE_CHANGED, indexes.size());
@@ -1272,6 +1281,17 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     m_task_flags &= ~FF_THUMNAIL;
     if (m_lock_start >= m_file_list.size() || m_lock_start >= m_lock_end)
         return;
+
+    // The FTPS filesystem exposes the actual media files, but A/P-series FTP
+    // servers do not expose the :6000 virtual "#thumbnail" objects used for
+    // videos/timelapses. Mark those cells complete with the standard icon.
+    // Model thumbnails are extracted locally from the downloaded 3MF archive.
+    if (m_use_ftps && m_file_type != F_MODEL) {
+        const size_t end = std::min(m_lock_end, GetCount());
+        for (size_t i = m_lock_start; i < end; ++i)
+            const_cast<File &>(GetFile(i)).flags |= FF_THUMNAIL;
+        return;
+    }
     size_t start = m_lock_start;
     size_t end   = std::min(m_lock_end, GetCount());
     std::vector<File> names;
@@ -2431,6 +2451,9 @@ void PrinterFileSystem::RequestFtpsUpload()
 
 boost::uint32_t PrinterFileSystem::SendRequest(int type, json const &req, callback_t2 const &callback,const std::string& param)
 {
+    if (m_use_ftps)
+        return SendFtpsRequest(type, req, callback, param);
+
     if (m_session.tunnel == nullptr) {
         Retry();
         callback(ERROR_PIPE, json(), nullptr);
@@ -2469,6 +2492,12 @@ void PrinterFileSystem::CancelRequest(boost::uint32_t seq) { CancelRequests({seq
 
 void PrinterFileSystem::CancelRequests(std::vector<boost::uint32_t> const &seqs)
 {
+    if (m_use_ftps) {
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_cancelled.insert(seqs.begin(), seqs.end());
+        return;
+    }
+
     json req;
     json arr;
     for (auto seq : seqs)
@@ -2486,6 +2515,12 @@ void PrinterFileSystem::CancelRequests(std::vector<boost::uint32_t> const &seqs)
 
 void PrinterFileSystem::CancelRequests2(std::vector<boost::uint32_t> const &seqs)
 {
+    if (m_use_ftps) {
+        boost::unique_lock lock(m_ftps_mutex);
+        m_ftps_cancelled.insert(seqs.begin(), seqs.end());
+        return;
+    }
+
     std::vector<std::pair<boost::uint32_t, callback_t2>> callbacks;
     boost::unique_lock      l(m_mutex);
     for (auto &f : seqs) {
