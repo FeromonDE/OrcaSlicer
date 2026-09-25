@@ -268,7 +268,9 @@ private:
 
     static bool ParseThumbnail(File &file, std::istream &is);
 
-    void UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type);
+    void UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type, int retry = 0);
+
+    void ScheduleThumbnailUpdate(std::shared_ptr<std::vector<File>> files, int type, int retry, int delay_ms);
 
     void FileRemoved(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path);
 
