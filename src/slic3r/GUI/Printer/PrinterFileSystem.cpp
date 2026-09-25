@@ -167,7 +167,7 @@ void PrinterFileSystem::ListAllFiles()
         req["storage"] = m_file_storage;
     req["api_version"] = 2;
     req["notify"] = "DETAIL";
-    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] LIST_INFO request"
+    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] LIST_INFO request"
                                << " type=" << m_file_type
                                << " storage=" << m_file_storage
                                << " req=" << req.dump();
@@ -185,7 +185,7 @@ void PrinterFileSystem::ListAllFiles()
         }
         return 0;
     }, [this, type = m_file_type](int result, FileList list) {
-        BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] LIST_INFO callback"
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] LIST_INFO callback"
                                    << " type=" << type
                                    << " current_type=" << m_file_type
                                    << " storage=" << m_file_storage
@@ -959,7 +959,7 @@ void PrinterFileSystem::UpdateFocusThumbnail()
     m_task_flags |= FF_THUMNAIL;
     const auto &batch = paths.empty() ? names : paths;
     if (m_file_type == F_MODEL && batch.size() == 1) {
-        BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] diagnostic serial chain"
+        BOOST_LOG_TRIVIAL(info) << "[StorageTrace] diagnostic serial chain"
                                 << " storage=" << m_file_storage
                                 << " file=" << batch.front().name
                                 << " path=" << batch.front().path;
@@ -1061,13 +1061,13 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
         }
         req["paths"] = arr;
     }
-    BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE request type=" << type
+    BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE request type=" << type
                             << " storage=" << m_file_storage
                             << " req=" << req.dump();
 
     SendRequest<File>(
         SUB_FILE, req, [type, files](json const &resp, File &file, unsigned char const *data) -> int {
-            BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE response type=" << type
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE response type=" << type
                                     << " path=" << resp.value("path", "")
                                     << " thumbnail=" << resp.value("thumbnail", "")
                                     << " size=" << resp.value("size", 0)
@@ -1099,7 +1099,7 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
                 else
                     file.local_path = std::string((char *) data, size);
                 bool parsed = ParseThumbnail(file);
-                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] ModelMetadata parsed"
+                BOOST_LOG_TRIVIAL(info) << "[StorageTrace] ModelMetadata parsed"
                                            << " path=" << path
                                            << " bytes=" << file.local_path.size()
                                            << " ok=" << parsed
@@ -1130,7 +1130,7 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             return 0;
         },
         [this, files, type](int result, File const &file) {
-            BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] SUB_FILE callback type=" << type
+            BOOST_LOG_TRIVIAL(info) << "[StorageTrace] SUB_FILE callback type=" << type
                                     << " result=" << result
                                     << " file=" << file.name
                                     << " path=" << file.path;
@@ -1163,8 +1163,20 @@ void PrinterFileSystem::UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>>
             }
             if (iter2 != files->end())
                 iter2->flags |= FF_THUMNAIL; // have received response
-            if (result != CONTINUE)
-                UpdateFocusThumbnail2(files, type == ModelMetadata ? ModelThumbnail : FinishThumbnail);
+            if (result == CONTINUE)
+                return;
+            if (result != SUCCESS) {
+                BOOST_LOG_TRIVIAL(warning) << "[StorageTrace] stopping thumbnail chain after error"
+                                           << " type=" << type
+                                           << " result=" << result
+                                           << " storage=" << m_file_storage
+                                           << " file=" << file.name
+                                           << " path=" << file.path;
+                // Diagnostic circuit breaker: do not immediately hammer the printer
+                // with the next SUB_FILE after an I/O/pipe error.
+                return;
+            }
+            UpdateFocusThumbnail2(files, type == ModelMetadata ? ModelThumbnail : FinishThumbnail);
         });
 }
 
