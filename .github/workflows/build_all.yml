@@ -25,11 +25,21 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+  actions: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  build_windows_fast:
+    name: Fast Windows x64 installer
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'bambu-signed-host' }}
+    uses: ./.github/workflows/build_windows_fast.yml
+    secrets: inherit
+
   check_build_script:
     name: Windows build script tests
     if: ${{ github.event_name != 'pull_request' || github.head_ref != 'bambu-signed-host' }}

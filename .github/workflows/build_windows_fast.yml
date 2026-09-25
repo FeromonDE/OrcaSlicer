@@ -1,18 +1,7 @@
 name: Build Windows x64 Fast Installer
 
 on:
-  pull_request:
-    branches:
-      - main
-      - release/*
-    paths:
-      - 'src/**'
-      - '**/CMakeLists.txt'
-      - 'version.inc'
-      - 'build_win.bat'
-      - 'scripts/build_preset_cache.*'
-      - '.github/workflows/build_windows_fast.yml'
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -25,7 +14,6 @@ concurrency:
 jobs:
   build_fast_installer:
     name: Fast Windows x64 installer
-    if: ${{ github.event_name != 'pull_request' || github.head_ref == 'bambu-signed-host' }}
     runs-on: windows-latest
     env:
       BUILD_DIR: build
