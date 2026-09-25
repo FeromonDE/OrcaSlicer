@@ -1,0 +1,39 @@
+name: Fetch Bambu networking DLL
+
+on:
+  push:
+    branches:
+      - chatgpt/fetch-bambu-networking-28261
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and extract network plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://public-cdn.bblmw.com/upgrade/studio/plugins/02.08.02.60/72163aeb05/win_02.08.02.60.zip'
+          curl -L --fail --retry 3 --retry-delay 2 "$URL" -o win_02.08.02.60.zip
+          mkdir -p extracted
+          unzip -q win_02.08.02.60.zip -d extracted
+          DLL="$(find extracted -type f -iname 'bambu_networking.dll' -print -quit)"
+          test -n "$DLL"
+          cp "$DLL" ./bambu_networking.dll
+          sha256sum win_02.08.02.60.zip bambu_networking.dll | tee SHA256SUMS.txt
+          file bambu_networking.dll
+          ls -lh bambu_networking.dll win_02.08.02.60.zip
+
+      - name: Upload extracted DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: bambu-networking-02.08.02.60
+          path: |
+            bambu_networking.dll
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
