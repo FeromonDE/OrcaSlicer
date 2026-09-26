@@ -126,35 +126,165 @@ static std::string ftps_sub_path(std::string const &path)
     return result;
 }
 
-static bool ftps_extract_zip_entry(std::string const &archive_data, std::string const &entry_name, std::string &output)
+struct FtpsRemoteZipReader
+{
+    BambuFtps::Client &client;
+    std::string path;
+    std::uint64_t archive_size = 0;
+    std::uint64_t cache_offset = std::numeric_limits<std::uint64_t>::max();
+    std::string cache;
+    std::string error;
+    std::uint64_t bytes_fetched = 0;
+};
+
+static size_t ftps_remote_zip_read(void *opaque, mz_uint64 file_offset, void *buffer, size_t bytes)
+{
+    auto &reader = *static_cast<FtpsRemoteZipReader *>(opaque);
+    if (bytes == 0)
+        return 0;
+    if (file_offset >= reader.archive_size)
+        return 0;
+
+    const std::uint64_t available = reader.archive_size - file_offset;
+    bytes = static_cast<size_t>(std::min<std::uint64_t>(available, bytes));
+
+    if (reader.cache_offset != std::numeric_limits<std::uint64_t>::max() &&
+        file_offset >= reader.cache_offset &&
+        file_offset + bytes <= reader.cache_offset + reader.cache.size()) {
+        const size_t offset = static_cast<size_t>(file_offset - reader.cache_offset);
+        std::memcpy(buffer, reader.cache.data() + offset, bytes);
+        return bytes;
+    }
+
+    constexpr size_t kReadAhead = 256 * 1024;
+    const size_t fetch_size = static_cast<size_t>(std::min<std::uint64_t>(
+        reader.archive_size - file_offset,
+        std::max(bytes, kReadAhead)));
+
+    std::string block;
+    block.reserve(fetch_size);
+    reader.error = reader.client.retrieve_range(
+        reader.path, file_offset, fetch_size,
+        [&block, fetch_size](void const *data, size_t size) {
+            const size_t remaining = fetch_size > block.size() ? fetch_size - block.size() : 0;
+            const size_t take = std::min(remaining, size);
+            block.append(static_cast<char const *>(data), take);
+            return block.size() < fetch_size;
+        });
+
+    if (!reader.error.empty() && block.size() < bytes)
+        return 0;
+    if (block.size() < bytes) {
+        reader.error = "Short FTPS range read";
+        return 0;
+    }
+
+    reader.bytes_fetched += block.size();
+    reader.cache_offset = file_offset;
+    reader.cache = std::move(block);
+    std::memcpy(buffer, reader.cache.data(), bytes);
+    return bytes;
+}
+
+static bool ftps_extract_remote_zip_entries(BambuFtps::Client &client,
+                                            std::string const &archive_path,
+                                            std::vector<std::string> const &entry_names,
+                                            std::map<std::string, std::string> &entries,
+                                            std::uint64_t &bytes_fetched,
+                                            std::string &error)
+{
+    entries.clear();
+    bytes_fetched = 0;
+    error.clear();
+
+    std::uint64_t archive_size = 0;
+    error = client.size(archive_path, archive_size);
+    if (!error.empty() || archive_size == 0) {
+        if (error.empty())
+            error = "Empty 3MF archive";
+        return false;
+    }
+
+    FtpsRemoteZipReader reader{client, archive_path, archive_size};
+    mz_zip_archive archive{};
+    archive.m_pRead = ftps_remote_zip_read;
+    archive.m_pIO_opaque = &reader;
+
+    if (!mz_zip_reader_init(&archive, archive_size, 0)) {
+        error = reader.error.empty() ? "Cannot read remote 3MF ZIP directory" : reader.error;
+        return false;
+    }
+
+    bool ok = true;
+    for (auto const &entry_name : entry_names) {
+        const int index = mz_zip_reader_locate_file(&archive, entry_name.c_str(), nullptr, 0);
+        if (index < 0) {
+            error = "3MF member not found: " + entry_name;
+            ok = false;
+            break;
+        }
+
+        mz_zip_archive_file_stat stat{};
+        if (!mz_zip_reader_file_stat(&archive, static_cast<mz_uint>(index), &stat)) {
+            error = "Cannot stat 3MF member: " + entry_name;
+            ok = false;
+            break;
+        }
+
+        if (stat.m_uncomp_size == 0) {
+            entries.emplace(entry_name, std::string());
+            continue;
+        }
+
+        size_t output_size = 0;
+        void *output = mz_zip_reader_extract_to_heap(
+            &archive, static_cast<mz_uint>(index), &output_size, 0);
+        if (!output) {
+            error = reader.error.empty() ? "Cannot extract 3MF member: " + entry_name
+                                         : reader.error;
+            ok = false;
+            break;
+        }
+        entries.emplace(entry_name,
+                        std::string(static_cast<char const *>(output), output_size));
+        mz_free(output);
+    }
+
+    mz_zip_reader_end(&archive);
+    bytes_fetched = reader.bytes_fetched;
+    return ok;
+}
+
+static bool ftps_make_partial_zip(std::map<std::string, std::string> const &entries,
+                                  std::string &output)
 {
     output.clear();
-    if (archive_data.empty() || entry_name.empty())
-        return false;
-
     mz_zip_archive archive{};
-    if (!mz_zip_reader_init_mem(&archive, archive_data.data(), archive_data.size(), 0))
+    if (!mz_zip_writer_init_heap(&archive, 0, 64 * 1024))
         return false;
 
-    int index = mz_zip_reader_locate_file(&archive, entry_name.c_str(), nullptr, 0);
-    if (index < 0) {
-        mz_zip_reader_end(&archive);
-        return false;
+    bool ok = true;
+    for (auto const &entry : entries) {
+        if (!mz_zip_writer_add_mem(&archive, entry.first.c_str(),
+                                   entry.second.data(), entry.second.size(),
+                                   MZ_DEFAULT_COMPRESSION)) {
+            ok = false;
+            break;
+        }
     }
 
-    mz_zip_archive_file_stat stat{};
-    if (!mz_zip_reader_file_stat(&archive, index, &stat)) {
-        mz_zip_reader_end(&archive);
-        return false;
-    }
+    void *buffer = nullptr;
+    size_t size = 0;
+    if (ok)
+        ok = mz_zip_writer_finalize_heap_archive(&archive, &buffer, &size) != 0;
+    mz_zip_writer_end(&archive);
 
-    output.resize(static_cast<size_t>(stat.m_uncomp_size));
-    const bool ok = stat.m_uncomp_size == 0 ||
-                    mz_zip_reader_extract_to_mem(&archive, index, output.data(), output.size(), 0);
-    mz_zip_reader_end(&archive);
-    if (!ok)
-        output.clear();
-    return ok;
+    if (!ok || !buffer)
+        return false;
+
+    output.assign(static_cast<char const *>(buffer), size);
+    mz_free(buffer);
+    return true;
 }
 
 static std::string storage_md5_hex(boost::uuids::detail::md5 &md5)
@@ -257,7 +387,6 @@ void PrinterFileSystem::SetFtpsEndpoint(std::string const &host, std::string con
         m_ftps_password = password;
         m_ftps_prefix.clear();
         m_ftps_storage_label.clear();
-        m_ftps_archive_cache.clear();
     }
 
     if (host.empty() || password.empty()) {
