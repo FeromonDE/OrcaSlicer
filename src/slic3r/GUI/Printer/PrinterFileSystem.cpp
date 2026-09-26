@@ -2285,75 +2285,70 @@ void PrinterFileSystem::DispatchFtpsRequest(boost::uint32_t seq, int type,
         const std::string archive_path = ftps_base_path(requested);
         const bool zip_request = req.value("zip", false);
 
-        std::shared_ptr<std::string> archive;
-        {
-            boost::unique_lock lock(m_ftps_mutex);
-            auto iter = m_ftps_archive_cache.find(archive_path);
-            if (iter != m_ftps_archive_cache.end())
-                archive = iter->second;
-        }
-
-        if (!archive) {
-            archive = std::make_shared<std::string>();
-            error = client.retrieve(
-                archive_path,
-                [archive](void const *data, size_t size) {
-                    archive->append(static_cast<char const *>(data), size);
-                    return true;
-                },
-                [this, seq](std::uint64_t, std::uint64_t) {
-                    return !IsFtpsCancelled(seq);
-                });
-            if (!error.empty()) {
-                const int result = IsFtpsCancelled(seq) || error == "cancelled"
-                    ? ERROR_CANCEL : FILE_READ_WRITE_ERR;
-                BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] RETR " << archive_path
-                                           << " failed: " << error;
-                finish(result, json::object(), nullptr);
+        std::vector<std::string> members;
+        members.reserve(req["paths"].size());
+        for (auto const &item : req["paths"]) {
+            const std::string full = item.get<std::string>();
+            if (ftps_base_path(full) != archive_path) {
+                finish(FILE_TYPE_ERR, json::object(), nullptr);
                 return;
             }
+            const std::string member = ftps_sub_path(full);
+            if (member.empty()) {
+                finish(FILE_TYPE_ERR, json::object(), nullptr);
+                return;
+            }
+            members.push_back(member);
+        }
+
+        std::map<std::string, std::string> extracted;
+        std::uint64_t fetched = 0;
+        if (!ftps_extract_remote_zip_entries(client, archive_path, members,
+                                             extracted, fetched, error)) {
+            const int result = IsFtpsCancelled(seq) || error == "cancelled"
+                ? ERROR_CANCEL
+                : (error.find("not found") != std::string::npos ? FILE_NO_EXIST
+                                                                : FILE_READ_WRITE_ERR);
+            BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] ranged 3MF read failed: "
+                                       << archive_path << " error=" << error;
+            finish(result, json::object(), nullptr);
+            return;
         }
 
         if (zip_request) {
-            // The native :6000 service synthesizes a partial zip containing the
-            // requested members. Returning the complete 3MF is equivalent for
-            // Orca's parser and avoids five separate FTPS downloads.
-            if (req["paths"].size() == 5) {
-                boost::unique_lock lock(m_ftps_mutex);
-                m_ftps_archive_cache[archive_path] = archive;
+            std::string partial_zip;
+            if (!ftps_make_partial_zip(extracted, partial_zip)) {
+                finish(FILE_READ_WRITE_ERR, json::object(), nullptr);
+                return;
             }
 
             json resp;
-            resp["size"] = archive->size();
+            resp["size"] = partial_zip.size();
             resp["path"] = archive_path;
             resp["thumbnail"] = boost::filesystem::path(archive_path).filename().string();
             resp["continue"] = false;
+
+            BOOST_LOG_TRIVIAL(info) << "[StorageFTPS] metadata range read"
+                                    << " archive=" << archive_path
+                                    << " archive_bytes=" << m_file_list.size()
+                                    << " transferred=" << fetched
+                                    << " partial_zip=" << partial_zip.size();
+
             finish(SUCCESS, resp,
-                   reinterpret_cast<unsigned char const *>(archive->data()));
+                   reinterpret_cast<unsigned char const *>(partial_zip.data()));
             return;
         }
 
-        const std::string member = ftps_sub_path(requested);
-        if (member.empty()) {
-            finish(FILE_TYPE_ERR, json::object(), nullptr);
-            return;
-        }
-
-        std::string extracted;
-        if (!ftps_extract_zip_entry(*archive, member, extracted)) {
-            BOOST_LOG_TRIVIAL(warning) << "[StorageFTPS] 3MF member not found: "
-                                       << archive_path << "#" << member;
+        const std::string member = members.front();
+        auto it = extracted.find(member);
+        if (it == extracted.end()) {
             finish(FILE_NO_EXIST, json::object(), nullptr);
             return;
         }
-
-        {
-            boost::unique_lock lock(m_ftps_mutex);
-            m_ftps_archive_cache.erase(archive_path);
-        }
+        std::string &data = it->second;
 
         json resp;
-        resp["size"] = extracted.size();
+        resp["size"] = data.size();
         resp["path"] = requested;
         resp["thumbnail"] = boost::filesystem::path(member).filename().string();
         resp["continue"] = false;
@@ -2363,8 +2358,14 @@ void PrinterFileSystem::DispatchFtpsRequest(boost::uint32_t seq, int type,
         else if (boost::iequals(ext, ".jpg") || boost::iequals(ext, ".jpeg"))
             resp["mimetype"] = "image/jpeg";
 
+        BOOST_LOG_TRIVIAL(info) << "[StorageFTPS] thumbnail range read"
+                                << " archive=" << archive_path
+                                << " member=" << member
+                                << " transferred=" << fetched
+                                << " payload=" << data.size();
+
         finish(SUCCESS, resp,
-               reinterpret_cast<unsigned char const *>(extracted.data()));
+               reinterpret_cast<unsigned char const *>(data.data()));
         return;
     }
 
