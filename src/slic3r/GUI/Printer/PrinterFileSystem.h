@@ -421,7 +421,6 @@ private:
     boost::mutex m_ftps_mutex;
     std::set<boost::uint32_t> m_ftps_active;
     std::set<boost::uint32_t> m_ftps_cancelled;
-    std::map<std::string, std::shared_ptr<std::string>> m_ftps_archive_cache;
 
     std::vector<bool> m_download_states;
 
