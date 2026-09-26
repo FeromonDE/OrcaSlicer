@@ -169,7 +169,7 @@ static size_t ftps_remote_zip_read(void *opaque, mz_uint64 file_offset, void *bu
             const size_t remaining = fetch_size > block.size() ? fetch_size - block.size() : 0;
             const size_t take = std::min(remaining, size);
             block.append(static_cast<char const *>(data), take);
-            return block.size() < fetch_size;
+            return true;
         });
 
     if (!reader.error.empty() && block.size() < bytes)
@@ -2330,7 +2330,6 @@ void PrinterFileSystem::DispatchFtpsRequest(boost::uint32_t seq, int type,
 
             BOOST_LOG_TRIVIAL(info) << "[StorageFTPS] metadata range read"
                                     << " archive=" << archive_path
-                                    << " archive_bytes=" << m_file_list.size()
                                     << " transferred=" << fetched
                                     << " partial_zip=" << partial_zip.size();
 
