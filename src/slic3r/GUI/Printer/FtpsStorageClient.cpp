@@ -64,7 +64,7 @@ void configure(CURL *curl, std::string const &url, std::string const &user,
     // control connection's host for the data socket.
     curl_easy_setopt(curl, CURLOPT_FTP_USE_EPSV, 0L);
     curl_easy_setopt(curl, CURLOPT_FTP_SKIP_PASV_IP, 1L);
-    curl_easy_setopt(curl, CURLOPT_FTP_FILE_METHOD, CURLFTPMETHOD_SINGLECWD);
+    curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
 
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
