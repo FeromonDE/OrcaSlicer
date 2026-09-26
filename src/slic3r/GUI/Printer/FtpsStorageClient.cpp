@@ -300,6 +300,35 @@ std::string Client::retrieve(std::string const &path, DataSink const &sink, Prog
     return {};
 }
 
+std::string Client::retrieve_range(std::string const &path, std::uint64_t offset,
+                                   std::size_t length, DataSink const &sink) const
+{
+    if (!ready())
+        return "FTPS endpoint is incomplete";
+    if (length == 0)
+        return {};
+
+    CURL *curl = curl_easy_init();
+    if (!curl)
+        return "curl_easy_init failed";
+
+    char error_buffer[CURL_ERROR_SIZE]{};
+    TransferContext ctx{sink, {}, false};
+    configure(curl, url(path, false), m_username, m_password, error_buffer);
+    const std::uint64_t end = offset + static_cast<std::uint64_t>(length) - 1;
+    const std::string range = std::to_string(offset) + "-" + std::to_string(end);
+    curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, transfer_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+
+    const CURLcode rc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK)
+        return ctx.cancelled ? "cancelled" : curl_error(rc, error_buffer);
+    return {};
+}
+
 std::string Client::size(std::string const &path, std::uint64_t &size_out) const
 {
     size_out = 0;
