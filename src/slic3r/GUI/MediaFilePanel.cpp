@@ -252,12 +252,19 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
     }
 
     Enable(obj && obj->is_info_ready() && obj->m_push_count > 0);
+    const bool want_ftps = wxGetApp().app_config->get_bool("bambu_storage_use_ftps");
     if (machine == m_machine && !sdcard_state_changed) {
-        if ((m_waiting_enable && IsEnabled()) || (m_waiting_support && (m_local_proto || m_remote_proto))) {
-            auto fs = m_image_grid->GetFileSystem();
-            if (fs) fs->Retry();
+        auto fs = m_image_grid->GetFileSystem();
+        if (!fs || fs->UseFtps() == want_ftps) {
+            if ((m_waiting_enable && IsEnabled()) ||
+                (m_waiting_support && (want_ftps ? !m_lan_ip.empty() : (m_local_proto || m_remote_proto)))) {
+                if (fs) fs->Retry();
+            }
+            return;
         }
-        return;
+        BOOST_LOG_TRIVIAL(info) << "MediaFilePanel: storage transport changed to "
+                                << (want_ftps ? "FTPS:990" : "native:6000")
+                                << ", recreating filesystem";
     }
     m_machine.swap(machine);
     m_last_errors.clear();
@@ -275,6 +282,7 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
     } else {
         boost::shared_ptr<PrinterFileSystem> fs(new PrinterFileSystem);
         fs->SetCacheScope(m_machine);
+        fs->SetUseFtps(want_ftps);
         fs->Attached();
         m_image_grid->SetFileSystem(fs);
         m_image_grid->SetFileType(m_last_type, m_external ? "" : "internal");
@@ -455,6 +463,23 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
         return;
     }
     m_waiting_enable = false;
+
+    if (fs->UseFtps()) {
+        m_waiting_support = false;
+        if (m_lan_ip.empty() || m_lan_passwd.empty()) {
+            m_image_grid->SetStatus(
+                m_bmp_failed,
+                _L("FTPS storage requires the printer LAN IP address and access code."));
+            fs->SetFtpsEndpoint("", "", "");
+            return;
+        }
+
+        BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: FTPS storage "
+                                << m_lan_ip << ":990";
+        fs->SetFtpsEndpoint(m_lan_ip, m_lan_user, m_lan_passwd);
+        return;
+    }
+
     if (!m_local_proto && !m_remote_proto) {
         m_waiting_support = true;
         m_image_grid->SetStatus(m_bmp_failed, _L("Browsing file in storage is not supported in current firmware. Please update the printer firmware."));
