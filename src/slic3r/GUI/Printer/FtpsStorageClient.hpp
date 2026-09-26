@@ -27,6 +27,7 @@ public:
 
     std::string list(std::string const &path, std::vector<Entry> &entries) const;
     std::string retrieve(std::string const &path, DataSink const &sink, Progress const &progress = {}) const;
+    std::string retrieve_range(std::string const &path, std::uint64_t offset, std::size_t length, DataSink const &sink) const;
     std::string size(std::string const &path, std::uint64_t &size_out) const;
     std::string remove(std::string const &path) const;
     std::string upload(std::string const &local_path, std::string const &remote_path, Progress const &progress = {}) const;
