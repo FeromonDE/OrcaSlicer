@@ -31,7 +31,18 @@ jobs:
         with:
           path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
           key: windows-x64-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
-          fail-on-cache-miss: true
+          restore-keys: |
+            windows-x64-clang-cache-orcaslicer_deps-build-
+          fail-on-cache-miss: false
+
+      - name: Verify dependency cache
+        shell: pwsh
+        run: |
+          $deps = "${{ github.workspace }}/deps/build/OrcaSlicer_dep"
+          if (-not (Test-Path $deps)) {
+            throw "No compatible Windows x64 clang dependency cache is available."
+          }
+          Write-Host "Using dependency cache: ${{ steps.deps_cache.outputs.cache-matched-key }}"
 
       - uses: lukka/get-cmake@latest
         with:
