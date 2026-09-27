@@ -1,6 +1,7 @@
 #include "PrinterFileSystem.h"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/Model.hpp"
 #include "slic3r/GUI/I18N.hpp"
 
@@ -19,6 +20,8 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #ifndef NDEBUG
@@ -65,6 +68,36 @@ static std::string storage_cache_hash(std::string const &value)
     auto bytes = reinterpret_cast<char const *>(&digest[0]);
     boost::algorithm::hex(bytes, bytes + sizeof(digest), std::back_inserter(result));
     return result;
+}
+
+static std::string current_print_task_key(std::string value)
+{
+    auto separator = value.find_last_of("/\\");
+    if (separator != std::string::npos)
+        value.erase(0, separator + 1);
+
+    auto dot = value.find_last_of('.');
+    if (dot != std::string::npos) {
+        std::string extension = value.substr(dot);
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension == ".3mf" || extension == ".gcode")
+            value.resize(dot);
+    }
+    return value;
+}
+
+static boost::filesystem::path current_print_thumbnail_path(std::string const &printer_id,
+                                                            std::string const &task_name)
+{
+    const std::string key = current_print_task_key(task_name);
+    if (printer_id.empty() || key.empty())
+        return {};
+
+    return boost::filesystem::path(Slic3r::data_dir()) /
+           "print_task_cache" /
+           storage_cache_hash(printer_id) /
+           (storage_cache_hash(key) + ".png");
 }
 
 static std::map<int, std::string> error_messages = {
@@ -137,6 +170,78 @@ void PrinterFileSystem::SetCacheScope(std::string const &printer_id)
 {
     m_cache_scope = printer_id.empty() ? std::string() : storage_cache_hash(printer_id);
     BOOST_LOG_TRIVIAL(info) << "[StorageCache] scope=" << (m_cache_scope.empty() ? "disabled" : m_cache_scope);
+}
+
+bool PrinterFileSystem::SaveCurrentPrintThumbnail(std::string const &printer_id,
+                                                  std::string const &task_name,
+                                                  Slic3r::ThumbnailData const &thumbnail)
+{
+    if (!thumbnail.is_valid())
+        return false;
+
+    const auto path = current_print_thumbnail_path(printer_id, task_name);
+    if (path.empty())
+        return false;
+
+    auto compressed = Slic3r::GCodeThumbnails::compress_thumbnail(
+        thumbnail, Slic3r::GCodeThumbnailsFormat::PNG);
+    if (!compressed || compressed->data == nullptr || compressed->size == 0)
+        return false;
+
+    try {
+        boost::filesystem::create_directories(path.parent_path());
+        boost::filesystem::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        if (!stream)
+            return false;
+
+        stream.write(reinterpret_cast<char const *>(compressed->data),
+                     static_cast<std::streamsize>(compressed->size));
+        stream.close();
+        if (!stream)
+            return false;
+
+        BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] saved task=" << task_name
+                                << " path=" << path.string();
+        return true;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] save failed task=" << task_name
+                                   << " error=" << e.what();
+        return false;
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] save failed task=" << task_name;
+        return false;
+    }
+}
+
+bool PrinterFileSystem::LoadCurrentPrintThumbnail(std::string const &printer_id,
+                                                  std::string const &task_name,
+                                                  wxBitmap &thumbnail)
+{
+    const auto path = current_print_thumbnail_path(printer_id, task_name);
+    if (path.empty() || !boost::filesystem::exists(path))
+        return false;
+
+    try {
+        const std::string png_utf8 = Slic3r::decode_path(path.string().c_str());
+        wxImage image;
+        if (!image.LoadFile(wxString::FromUTF8(png_utf8.c_str()), wxBITMAP_TYPE_PNG) || !image.IsOk())
+            return false;
+
+        thumbnail = wxBitmap(image);
+        if (!thumbnail.IsOk())
+            return false;
+
+        BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] hit task=" << task_name
+                                << " path=" << path.string();
+        return true;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] load failed task=" << task_name
+                                   << " error=" << e.what();
+        return false;
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] load failed task=" << task_name;
+        return false;
+    }
 }
 
 void PrinterFileSystem::SetFileType(FileType type, std::string const &storage)

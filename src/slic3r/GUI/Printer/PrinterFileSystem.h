@@ -16,6 +16,8 @@ using nlohmann::json;
 #include <functional>
 #include <deque>
 
+namespace Slic3r { struct ThumbnailData; }
+
 wxDECLARE_EVENT(EVT_STATUS_CHANGED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_MODE_CHANGED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_FILE_CHANGED, wxCommandEvent);
@@ -242,6 +244,13 @@ public:
     void SetUrl(std::string const &url);
 
     void SetCacheScope(std::string const &printer_id);
+
+    // Local preview for LAN/SD-card print jobs started from OrcaSlicer.
+    // This deliberately does not use the printer Storage/SUB_FILE path.
+    static bool SaveCurrentPrintThumbnail(std::string const &printer_id, std::string const &task_name,
+                                          Slic3r::ThumbnailData const &thumbnail);
+    static bool LoadCurrentPrintThumbnail(std::string const &printer_id, std::string const &task_name,
+                                          wxBitmap &thumbnail);
 
     void Stop(bool quit = false);
 

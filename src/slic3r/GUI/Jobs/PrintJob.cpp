@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
+#include "slic3r/GUI/Printer/PrinterFileSystem.h"
 #include "slic3r/GUI/format.hpp"
 #include "bambu_networking.hpp"
 
@@ -387,6 +388,25 @@ void PrintJob::process(Ctl &ctl)
 
     if (params.preset_name.empty() && m_print_type == "from_normal") { params.preset_name = wxString::Format("%s_plate_%d", transport_project_name, curr_plate_idx).ToStdString(); }
     if (params.project_name.empty()) {params.project_name = transport_project_name;}
+
+    // The Device page intentionally uses a generic image for SD-card/LAN jobs upstream.
+    // Preserve the plate preview locally while we still have the sliced project so the
+    // status panel can show the real model without asking the printer for SUB_FILE data.
+    if (m_print_type == "from_normal") {
+        PartPlate *thumbnail_plate = nullptr;
+        if (job_data.plate_idx >= 0)
+            thumbnail_plate = m_plater->get_partplate_list().get_plate(job_data.plate_idx);
+        if (thumbnail_plate == nullptr)
+            thumbnail_plate = m_plater->get_partplate_list().get_curr_plate();
+
+        if (thumbnail_plate != nullptr && thumbnail_plate->thumbnail_data.is_valid()) {
+            PrinterFileSystem::SaveCurrentPrintThumbnail(m_dev_id, params.project_name, thumbnail_plate->thumbnail_data);
+            PrinterFileSystem::SaveCurrentPrintThumbnail(m_dev_id, m_project_name, thumbnail_plate->thumbnail_data);
+            if (!job_data._3mf_path.empty())
+                PrinterFileSystem::SaveCurrentPrintThumbnail(
+                    m_dev_id, job_data._3mf_path.stem().string(), thumbnail_plate->thumbnail_data);
+        }
+    }
 
     if (m_is_calibration_task) {
         params.project_name = transport_project_name;
