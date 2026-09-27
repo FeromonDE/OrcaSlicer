@@ -50,7 +50,7 @@ wxDEFINE_EVENT(EVT_FILE_CALLBACK, wxCommandEvent);
 
 static wxBitmap default_thumbnail;
 
-static constexpr int STORAGE_CACHE_VERSION = 1;
+static constexpr int STORAGE_CACHE_VERSION = 2;
 
 static std::string storage_cache_hash(std::string const &value)
 {
@@ -952,17 +952,19 @@ enum ThumbnailType
 
 std::string PrinterFileSystem::StorageCachePath(File const &file, char const *extension) const
 {
-    if (m_cache_scope.empty() || file.time == 0 || file.size == 0)
+    if (m_cache_scope.empty() || file.size == 0)
         return {};
 
+    // LIST_INFO "time" is not a stable persistent identity on every Bambu
+    // firmware/plugin combination. Keep it in the cache payload for diagnostics,
+    // but do not let it change the cache filename.
     std::ostringstream identity;
     identity << STORAGE_CACHE_VERSION << '\n'
              << m_cache_scope << '\n'
              << m_file_storage << '\n'
              << file.path << '\n'
              << file.name << '\n'
-             << file.size << '\n'
-             << static_cast<long long>(file.time);
+             << file.size;
 
     boost::filesystem::path dir = boost::filesystem::path(Slic3r::data_dir()) /
                                   "storage_cache" /
@@ -980,9 +982,46 @@ PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File 
         return StorageCacheLoad::Miss;
 
     boost::filesystem::path json_path(json_name);
+    bool legacy_cache = false;
+
+    // Version 1 used mtime in the cache filename. If the printer reported a
+    // different mtime on the next session the old entry became unreachable.
+    // On the first v2 lookup, find a matching v1 entry by stable attributes and
+    // migrate it instead of re-reading the 3MF from the printer.
     if (!boost::filesystem::exists(json_path)) {
-        BOOST_LOG_TRIVIAL(info) << "[StorageCache] miss path=" << file.path;
-        return StorageCacheLoad::Miss;
+        boost::filesystem::path dir = json_path.parent_path();
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(dir, ec)) {
+            for (boost::filesystem::directory_iterator it(dir, ec), it_end; !ec && it != it_end; it.increment(ec)) {
+                auto candidate = it->path();
+                if (!boost::filesystem::is_regular_file(candidate, ec) || candidate.extension() != ".json")
+                    continue;
+                try {
+                    boost::filesystem::ifstream legacy_stream(candidate);
+                    if (!legacy_stream)
+                        continue;
+                    json legacy_entry;
+                    legacy_stream >> legacy_entry;
+                    if (legacy_entry.value("version", 0) != 1 ||
+                        legacy_entry.value("storage", std::string()) != m_file_storage ||
+                        legacy_entry.value("path", std::string()) != file.path ||
+                        legacy_entry.value("name", std::string()) != file.name ||
+                        legacy_entry.value("size", boost::uint64_t(0)) != file.size)
+                        continue;
+                    json_path = candidate;
+                    legacy_cache = true;
+                    BOOST_LOG_TRIVIAL(info) << "[StorageCache] legacy match path=" << file.path;
+                    break;
+                } catch (...) {
+                    // Ignore unrelated/corrupt legacy entries and keep searching.
+                }
+            }
+        }
+
+        if (!legacy_cache) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] miss path=" << file.path;
+            return StorageCacheLoad::Miss;
+        }
     }
 
     try {
@@ -992,21 +1031,28 @@ PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File 
 
         json entry;
         stream >> entry;
-        if (entry.value("version", 0) != STORAGE_CACHE_VERSION ||
+        const int cache_version = entry.value("version", 0);
+        if ((cache_version != 1 && cache_version != STORAGE_CACHE_VERSION) ||
             entry.value("storage", std::string()) != m_file_storage ||
             entry.value("path", std::string()) != file.path ||
             entry.value("name", std::string()) != file.name ||
-            entry.value("size", boost::uint64_t(0)) != file.size ||
-            entry.value("time", int64_t(0)) != static_cast<int64_t>(file.time)) {
+            entry.value("size", boost::uint64_t(0)) != file.size) {
             BOOST_LOG_TRIVIAL(info) << "[StorageCache] stale path=" << file.path;
             return StorageCacheLoad::Miss;
+        }
+
+        const int64_t cached_time = entry.value("time", int64_t(0));
+        if (cached_time != 0 && file.time != 0 && cached_time != static_cast<int64_t>(file.time)) {
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] mtime drift ignored path=" << file.path
+                                    << " cached=" << cached_time
+                                    << " current=" << static_cast<int64_t>(file.time);
         }
 
         auto metadata = entry.at("metadata").get<std::map<std::string, std::string>>();
         bool has_thumbnail = entry.value("has_thumbnail", false);
         if (has_thumbnail) {
-            auto png_name = StorageCachePath(file, ".png");
-            boost::filesystem::path png_path(png_name);
+            boost::filesystem::path png_path = json_path;
+            png_path.replace_extension(".png");
             if (!boost::filesystem::exists(png_path))
                 return StorageCacheLoad::Miss;
             std::string png_utf8 = Slic3r::decode_path(png_path.string().c_str());
@@ -1019,6 +1065,25 @@ PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File 
         file.metadata = std::move(metadata);
         auto thumbnail_it = file.metadata.find("Thumbnail");
         const bool expects_thumbnail = thumbnail_it != file.metadata.end() && !thumbnail_it->second.empty();
+
+        // Migrate a matching v1 entry to the stable v2 filename. Do this only
+        // after the old JSON/PNG pair has been read successfully.
+        if (legacy_cache) {
+            auto old_json = json_path;
+            boost::filesystem::path old_png = old_json;
+            old_png.replace_extension(".png");
+
+            SaveStorageCache(file, has_thumbnail);
+
+            boost::system::error_code remove_ec;
+            if (old_json.string() != StorageCachePath(file, ".json"))
+                boost::filesystem::remove(old_json, remove_ec);
+            remove_ec.clear();
+            if (has_thumbnail && old_png.string() != StorageCachePath(file, ".png"))
+                boost::filesystem::remove(old_png, remove_ec);
+
+            BOOST_LOG_TRIVIAL(info) << "[StorageCache] migrated v1->v2 path=" << file.path;
+        }
 
         if (!has_thumbnail && expects_thumbnail) {
             BOOST_LOG_TRIVIAL(info) << "[StorageCache] metadata hit path=" << file.path;
@@ -1038,7 +1103,6 @@ PrinterFileSystem::StorageCacheLoad PrinterFileSystem::TryLoadStorageCache(File 
         return StorageCacheLoad::Miss;
     }
 }
-
 void PrinterFileSystem::SaveStorageCache(File const &file, bool include_thumbnail) const
 {
     if (m_file_type != F_MODEL || file.metadata.empty())
