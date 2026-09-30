@@ -249,6 +249,8 @@ public:
     // This deliberately does not use the printer Storage/SUB_FILE path.
     static bool SaveCurrentPrintThumbnail(std::string const &printer_id, std::string const &task_name,
                                           Slic3r::ThumbnailData const &thumbnail);
+    static bool SaveCurrentPrintThumbnailFrom3mf(std::string const &printer_id, std::string const &task_name,
+                                                std::string const &three_mf_path);
     static bool LoadCurrentPrintThumbnail(std::string const &printer_id, std::string const &task_name,
                                           wxBitmap &thumbnail);
 

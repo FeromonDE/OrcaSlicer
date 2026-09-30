@@ -76,14 +76,31 @@ static std::string current_print_task_key(std::string value)
     if (separator != std::string::npos)
         value.erase(0, separator + 1);
 
-    auto dot = value.find_last_of('.');
-    if (dot != std::string::npos) {
+    // Printer telemetry may report "name.gcode.3mf", "name_plate_1.gcode"
+    // or just the project/subtask name. Collapse those forms to one stable key.
+    for (;;) {
+        auto dot = value.find_last_of('.');
+        if (dot == std::string::npos)
+            break;
+
         std::string extension = value.substr(dot);
         std::transform(extension.begin(), extension.end(), extension.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (extension == ".3mf" || extension == ".gcode")
-            value.resize(dot);
+        if (extension != ".3mf" && extension != ".gcode")
+            break;
+        value.resize(dot);
     }
+
+    auto plate = value.rfind("_plate_");
+    if (plate != std::string::npos) {
+        const std::string suffix = value.substr(plate + 7);
+        const bool numeric = !suffix.empty() &&
+            std::all_of(suffix.begin(), suffix.end(),
+                        [](unsigned char c) { return std::isdigit(c) != 0; });
+        if (numeric)
+            value.resize(plate);
+    }
+
     return value;
 }
 
@@ -209,6 +226,45 @@ bool PrinterFileSystem::SaveCurrentPrintThumbnail(std::string const &printer_id,
         return false;
     } catch (...) {
         BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] save failed task=" << task_name;
+        return false;
+    }
+}
+
+bool PrinterFileSystem::SaveCurrentPrintThumbnailFrom3mf(std::string const &printer_id,
+                                                          std::string const &task_name,
+                                                          std::string const &three_mf_path)
+{
+    const auto path = current_print_thumbnail_path(printer_id, task_name);
+    if (path.empty() || three_mf_path.empty())
+        return false;
+
+    try {
+        std::string png = Slic3r::bbs_3mf_get_thumbnail(three_mf_path.c_str());
+        if (png.empty()) {
+            BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] 3MF has no preview task=" << task_name
+                                       << " source=" << three_mf_path;
+            return false;
+        }
+
+        boost::filesystem::create_directories(path.parent_path());
+        boost::filesystem::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        if (!stream)
+            return false;
+        stream.write(png.data(), static_cast<std::streamsize>(png.size()));
+        stream.close();
+        if (!stream)
+            return false;
+
+        BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] saved from 3MF task=" << task_name
+                                << " source=" << three_mf_path
+                                << " path=" << path.string();
+        return true;
+    } catch (std::exception const &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] 3MF fallback failed task=" << task_name
+                                   << " error=" << e.what();
+        return false;
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintThumbnail] 3MF fallback failed task=" << task_name;
         return false;
     }
 }

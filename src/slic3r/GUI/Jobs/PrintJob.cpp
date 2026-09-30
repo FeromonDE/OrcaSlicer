@@ -399,13 +399,30 @@ void PrintJob::process(Ctl &ctl)
         if (thumbnail_plate == nullptr)
             thumbnail_plate = m_plater->get_partplate_list().get_curr_plate();
 
+        const std::string task_key =
+            !m_project_name.empty() ? m_project_name :
+            !params.project_name.empty() ? params.project_name :
+            !params.preset_name.empty() ? params.preset_name :
+            (!job_data._3mf_path.empty() ? job_data._3mf_path.stem().string() : std::string());
+
+        bool preview_saved = false;
         if (thumbnail_plate != nullptr && thumbnail_plate->thumbnail_data.is_valid()) {
-            PrinterFileSystem::SaveCurrentPrintThumbnail(m_dev_id, params.project_name, thumbnail_plate->thumbnail_data);
-            PrinterFileSystem::SaveCurrentPrintThumbnail(m_dev_id, m_project_name, thumbnail_plate->thumbnail_data);
-            if (!job_data._3mf_path.empty())
-                PrinterFileSystem::SaveCurrentPrintThumbnail(
-                    m_dev_id, job_data._3mf_path.stem().string(), thumbnail_plate->thumbnail_data);
+            preview_saved = PrinterFileSystem::SaveCurrentPrintThumbnail(
+                m_dev_id, task_key, thumbnail_plate->thumbnail_data);
         }
+
+        // thumbnail_data may already have been released by the time PrintJob runs.
+        // The generated 3MF still contains the preview, so use it as a deterministic fallback.
+        if (!preview_saved && !job_data._3mf_path.empty()) {
+            preview_saved = PrinterFileSystem::SaveCurrentPrintThumbnailFrom3mf(
+                m_dev_id, task_key, job_data._3mf_path.string());
+        }
+
+        BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] prepare task=" << task_key
+                                << " subtask-project=" << params.project_name
+                                << " preset=" << params.preset_name
+                                << " source=" << job_data._3mf_path.string()
+                                << " saved=" << preview_saved;
     }
 
     if (m_is_calibration_task) {
