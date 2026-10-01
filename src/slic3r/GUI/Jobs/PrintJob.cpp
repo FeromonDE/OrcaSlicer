@@ -7,7 +7,6 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
-#include "slic3r/GUI/Printer/PrinterFileSystem.h"
 #include "slic3r/GUI/format.hpp"
 #include "bambu_networking.hpp"
 
@@ -388,42 +387,6 @@ void PrintJob::process(Ctl &ctl)
 
     if (params.preset_name.empty() && m_print_type == "from_normal") { params.preset_name = wxString::Format("%s_plate_%d", transport_project_name, curr_plate_idx).ToStdString(); }
     if (params.project_name.empty()) {params.project_name = transport_project_name;}
-
-    // The Device page intentionally uses a generic image for SD-card/LAN jobs upstream.
-    // Preserve the plate preview locally while we still have the sliced project so the
-    // status panel can show the real model without asking the printer for SUB_FILE data.
-    if (m_print_type == "from_normal") {
-        PartPlate *thumbnail_plate = nullptr;
-        if (job_data.plate_idx >= 0)
-            thumbnail_plate = m_plater->get_partplate_list().get_plate(job_data.plate_idx);
-        if (thumbnail_plate == nullptr)
-            thumbnail_plate = m_plater->get_partplate_list().get_curr_plate();
-
-        const std::string task_key =
-            !m_project_name.empty() ? m_project_name :
-            !params.project_name.empty() ? params.project_name :
-            !params.preset_name.empty() ? params.preset_name :
-            (!job_data._3mf_path.empty() ? job_data._3mf_path.stem().string() : std::string());
-
-        bool preview_saved = false;
-        if (thumbnail_plate != nullptr && thumbnail_plate->thumbnail_data.is_valid()) {
-            preview_saved = PrinterFileSystem::SaveCurrentPrintThumbnail(
-                m_dev_id, task_key, thumbnail_plate->thumbnail_data);
-        }
-
-        // thumbnail_data may already have been released by the time PrintJob runs.
-        // The generated 3MF still contains the preview, so use it as a deterministic fallback.
-        if (!preview_saved && !job_data._3mf_path.empty()) {
-            preview_saved = PrinterFileSystem::SaveCurrentPrintThumbnailFrom3mf(
-                m_dev_id, task_key, job_data._3mf_path.string());
-        }
-
-        BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] prepare task=" << task_key
-                                << " subtask-project=" << params.project_name
-                                << " preset=" << params.preset_name
-                                << " source=" << job_data._3mf_path.string()
-                                << " saved=" << preview_saved;
-    }
 
     if (m_is_calibration_task) {
         params.project_name = transport_project_name;

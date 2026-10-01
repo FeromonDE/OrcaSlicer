@@ -9,7 +9,6 @@
 #include "BitmapCache.hpp"
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
-#include "Printer/PrinterFileSystem.h"
 
 #include "MsgDialog.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -3952,45 +3951,6 @@ void StatusPanel::update_cloud_subtask(MachineObject *obj)
 void StatusPanel::update_sdcard_subtask(MachineObject *obj)
 {
     if (!obj) return;
-
-    // The printer can announce the SD-card task before PrintJob has finished writing the
-    // local preview cache. Do not latch the placeholder forever: retry the cheap local
-    // lookup on later telemetry updates until the real image becomes available.
-    if (m_current_print_mode != PrintingTaskType::CALIBRATION &&
-        task_thumbnail_state != ThumbnailState::TASK_THUMBNAIL) {
-        wxBitmap cached_thumbnail;
-        std::string matched_key;
-
-        if (!obj->subtask_name.empty() &&
-            PrinterFileSystem::LoadCurrentPrintThumbnail(
-                obj->get_dev_id(), obj->subtask_name, cached_thumbnail)) {
-            matched_key = obj->subtask_name;
-        } else if (!obj->m_gcode_file.empty() &&
-                   PrinterFileSystem::LoadCurrentPrintThumbnail(
-                       obj->get_dev_id(), obj->m_gcode_file, cached_thumbnail)) {
-            matched_key = obj->m_gcode_file;
-        }
-
-        if (cached_thumbnail.IsOk()) {
-            wxImage image = cached_thumbnail.ConvertToImage();
-            const wxSize target_size = m_project_task_panel->get_bitmap_thumbnail()->GetSize();
-            if (image.IsOk() && target_size.x > 0 && target_size.y > 0 &&
-                (image.GetWidth() != target_size.x || image.GetHeight() != target_size.y)) {
-                image = image.Scale(target_size.x, target_size.y, wxIMAGE_QUALITY_HIGH);
-            }
-
-            if (image.IsOk()) {
-                m_project_task_panel->set_thumbnail_img(wxBitmap(image), "");
-                m_project_task_panel->set_brightness_value(get_brightness_value(image));
-                task_thumbnail_state = ThumbnailState::TASK_THUMBNAIL;
-                m_load_sdcard_thumbnail = true;
-                BOOST_LOG_TRIVIAL(info) << "[PrintThumbnail] displayed key=" << matched_key
-                                        << " subtask=" << obj->subtask_name
-                                        << " gcode=" << obj->m_gcode_file;
-                return;
-            }
-        }
-    }
 
     if (!m_load_sdcard_thumbnail) {
         update_calib_bitmap();
