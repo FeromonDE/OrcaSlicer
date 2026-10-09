@@ -156,6 +156,7 @@ int BBLPrinterAgent::send_message(std::string dev_id, std::string json_str, int 
             return legacy_func(agent, std::move(dev_id), std::move(json_str), qos);
         }
         case NetworkAbi::V0203:
+        case NetworkAbi::V020802:
         case NetworkAbi::Current:
             return func(agent, std::move(dev_id), std::move(json_str), qos, flag);
         default:
@@ -200,6 +201,7 @@ int BBLPrinterAgent::send_message_to_printer(std::string dev_id, std::string jso
             return legacy_func(agent, std::move(dev_id), std::move(json_str), qos);
         }
         case NetworkAbi::V0203:
+        case NetworkAbi::V020802:
         case NetworkAbi::Current:
             return func(agent, std::move(dev_id), std::move(json_str), qos, flag);
         default:
@@ -289,6 +291,7 @@ int BBLPrinterAgent::bind(std::string dev_ip, std::string dev_id, std::string de
             auto older_func = as_abi<func_bind_pre0208>(func);
             return older_func(agent, dev_ip, dev_id, sec_link, timezone, improved, update_fn);
         }
+        case NetworkAbi::V020802:
         case NetworkAbi::Current:
             return func(agent, dev_ip, dev_id, dev_model, sec_link, timezone, improved, update_fn);
         default:
@@ -437,7 +440,7 @@ namespace {
 // (each arm's converted params must match the casted signature). Each arm converts and calls
 // in one step: as_legacy()/as_0203() move out of `params` and their prvalue result lands in
 // the by-value ABI argument without another copy; the Current arm moves `params` outright.
-template <typename LegacyFn, typename Fn0203, typename CurrentFn, typename... CallbackFns>
+template <typename LegacyFn, typename Fn0203, typename Fn020802, typename CurrentFn, typename... CallbackFns>
 int dispatch_start(CurrentFn func, PrintParams& params, const CallbackFns&... callbacks)
 {
     auto& plugin = BBLNetworkPlugin::instance();
@@ -450,6 +453,8 @@ int dispatch_start(CurrentFn func, PrintParams& params, const CallbackFns&... ca
         return as_abi<LegacyFn>(func)(agent, BBLNetworkPlugin::as_legacy(params), callbacks...);
     case NetworkAbi::V0203:
         return as_abi<Fn0203>(func)(agent, BBLNetworkPlugin::as_0203(params), callbacks...);
+    case NetworkAbi::V020802:
+        return as_abi<Fn020802>(func)(agent, BBLNetworkPlugin::as_020802(params), callbacks...);
     case NetworkAbi::Current:
         return func(agent, std::move(params), callbacks...);
     default:
@@ -461,31 +466,31 @@ int dispatch_start(CurrentFn func, PrintParams& params, const CallbackFns&... ca
 
 int BBLPrinterAgent::start_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
-    return dispatch_start<func_start_print_legacy, func_start_print_0203>(
+    return dispatch_start<func_start_print_legacy, func_start_print_0203, func_start_print_020802>(
         BBLNetworkPlugin::instance().get_start_print(), params, update_fn, cancel_fn, wait_fn);
 }
 
 int BBLPrinterAgent::start_local_print_with_record(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
-    return dispatch_start<func_start_local_print_with_record_legacy, func_start_local_print_with_record_0203>(
+    return dispatch_start<func_start_local_print_with_record_legacy, func_start_local_print_with_record_0203, func_start_local_print_with_record_020802>(
         BBLNetworkPlugin::instance().get_start_local_print_with_record(), params, update_fn, cancel_fn, wait_fn);
 }
 
 int BBLPrinterAgent::start_send_gcode_to_sdcard(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn)
 {
-    return dispatch_start<func_start_send_gcode_to_sdcard_legacy, func_start_send_gcode_to_sdcard_0203>(
+    return dispatch_start<func_start_send_gcode_to_sdcard_legacy, func_start_send_gcode_to_sdcard_0203, func_start_send_gcode_to_sdcard_020802>(
         BBLNetworkPlugin::instance().get_start_send_gcode_to_sdcard(), params, update_fn, cancel_fn, wait_fn);
 }
 
 int BBLPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn)
 {
-    return dispatch_start<func_start_local_print_legacy, func_start_local_print_0203>(
+    return dispatch_start<func_start_local_print_legacy, func_start_local_print_0203, func_start_local_print_020802>(
         BBLNetworkPlugin::instance().get_start_local_print(), params, update_fn, cancel_fn);
 }
 
 int BBLPrinterAgent::start_sdcard_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn)
 {
-    return dispatch_start<func_start_sdcard_print_legacy, func_start_sdcard_print_0203>(
+    return dispatch_start<func_start_sdcard_print_legacy, func_start_sdcard_print_0203, func_start_sdcard_print_020802>(
         BBLNetworkPlugin::instance().get_start_sdcard_print(), params, update_fn, cancel_fn);
 }
 

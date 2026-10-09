@@ -241,6 +241,8 @@ public:
 
     void SetUrl(std::string const &url);
 
+    void SetCacheScope(std::string const &printer_id);
+
     void Stop(bool quit = false);
 
     boost::uint32_t RequestMediaAbility(int api_version);
@@ -268,7 +270,22 @@ private:
 
     static bool ParseThumbnail(File &file, std::istream &is);
 
-    void UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type);
+    void UpdateFocusThumbnail2(std::shared_ptr<std::vector<File>> files, int type, int retry = 0);
+
+    void ScheduleThumbnailUpdate(std::shared_ptr<std::vector<File>> files, int type, int retry, int delay_ms);
+
+    enum class StorageCacheLoad
+    {
+        Miss,
+        MetadataOnly,
+        Complete
+    };
+
+    StorageCacheLoad TryLoadStorageCache(File &file);
+
+    void SaveStorageCache(File const &file, bool include_thumbnail) const;
+
+    std::string StorageCachePath(File const &file, char const *extension) const;
 
     void FileRemoved(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path);
 
@@ -376,6 +393,7 @@ private:
     size_t m_lock_start = 0;
     size_t m_lock_end   = 0;
     int m_task_flags = 0;
+    std::string m_cache_scope;
 
     std::vector<bool> m_download_states;
 
