@@ -636,7 +636,7 @@ PrintParams_0203 BBLNetworkPlugin::as_0203(PrintParams& param)
 }
 
 
-// 02.08.02 is layout-compatible with 02.08.01 through slicer_uid and appends
+// 02.08.02 and 02.08.04 are layout-compatible with 02.08.01 through slicer_uid and append
 // queue_plate_id. Orca does not use print-queue plates yet, so leave it empty.
 PrintParams_020802 BBLNetworkPlugin::as_020802(PrintParams& param)
 {
