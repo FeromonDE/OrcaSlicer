@@ -620,25 +620,13 @@ namespace Slic3r
 
                     return true;
                 }
-                // same dev_id, lan => disconnect and reconnect
+                // The selected LAN printer is already connected. Reconnecting it here can
+                // invalidate the network plugin session while asynchronous status messages
+                // are still in flight, notably immediately after a print is sent.
                 else
                 {
                     BOOST_LOG_TRIVIAL(info) << "set_selected_machine: same lan machine, dev_id =" << dev_id
-                        << ", disconnect and reconnect";
-
-                    // lan mode printer reconnect printer
-                    if (m_agent)
-                    {
-                        m_agent->disconnect_printer();
-                        it->second->reset();
-
-#if !BBL_RELEASE_TO_PUBLIC
-                        it->second->connect(Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
-#else
-                        it->second->connect(it->second->local_use_ssl);
-#endif
-                        it->second->set_lan_mode_connection_state(true);
-                    }
+                        << ", keep existing connection";
                 }
             }
             else
