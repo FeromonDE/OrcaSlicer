@@ -1,0 +1,66 @@
+name: Publish latest build to Releases
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-latest-release.yml']
+  workflow_run:
+    workflows: ["Build Windows x64"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: publish-latest-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_branch == 'bambu-signed-host' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
+           github.event.workflow_run.event == 'pull_request') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: dev-latest
+      ARTIFACT: OrcaSlicer_Windows_Fast_Installer_x64
+      SEED_RUN_ID: '38000378561'
+    steps:
+      - name: Download approved successful build
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="$SEED_RUN_ID"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+          fi
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D "$RUNNER_TEMP/unpacked"
+          SHA="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.head_sha')"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$(find "$RUNNER_TEMP/unpacked" -type f -iname '*.exe' -print -quit)"
+          test -n "$FILE"
+          cp "$FILE" "$RUNNER_TEMP/OrcaSlicer-Windows-x64-Installer.exe"
+      - name: Publish rolling prerelease
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          NOTES="$(printf 'Latest successful build from branch bambu-signed-host.\n\nSource commit: %s\nBuild: https://github.com/%s/actions/runs/%s\n' "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_RUN_ID")"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RUNNER_TEMP/OrcaSlicer-Windows-x64-Installer.exe" --clobber -R "$GITHUB_REPOSITORY"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$SOURCE_SHA" -F force=true >/dev/null
+            gh release edit "$TAG" --notes "$NOTES" --prerelease -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$RUNNER_TEMP/OrcaSlicer-Windows-x64-Installer.exe" --target "$SOURCE_SHA" --title "OrcaSlicer – latest signed-host Windows x64" --notes "$NOTES" --prerelease -R "$GITHUB_REPOSITORY"
+          fi
