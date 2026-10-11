@@ -1,23 +1,6 @@
 name: Build Windows x64
 
 on:
-  pull_request:
-    branches:
-      - main
-      - release/*
-    paths:
-      - 'deps/**'
-      - 'deps_src/**'
-      - 'src/**'
-      - '**/CMakeLists.txt'
-      - 'version.inc'
-      - ".github/workflows/build_*.yml"
-      - ".github/workflows/unit_tests*.yml"
-      - 'build_win.bat'
-      - 'scripts/test_build_win.ps1'
-      - 'scripts/build_preset_cache.*'
-      - 'scripts/msix/**'
-      - 'tests/**'
   workflow_dispatch:
     inputs:
       build-deps-only:
@@ -36,13 +19,13 @@ concurrency:
 jobs:
   build_windows_fast:
     name: Fast Windows x64 installer
-    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'bambu-signed-host' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'bambu-signed-host' }}
     uses: ./.github/workflows/build_windows_fast.yml
     secrets: inherit
 
   check_build_script:
     name: Windows build script tests
-    if: ${{ github.event_name != 'pull_request' || github.head_ref != 'bambu-signed-host' }}
+    if: ${{ github.ref_name != 'bambu-signed-host' }}
     runs-on: windows-latest
     steps:
       - name: Checkout
