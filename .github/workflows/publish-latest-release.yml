@@ -1,12 +1,8 @@
 name: Publish latest build to Releases
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/publish-latest-release.yml']
   workflow_run:
     workflows: ["Build Windows x64"]
     types: [completed]
-  workflow_dispatch:
 permissions:
   actions: read
   contents: write
@@ -16,27 +12,22 @@ concurrency:
 jobs:
   publish:
     if: >-
-      ${{ github.event_name != 'workflow_run' ||
-          (github.event.workflow_run.conclusion == 'success' &&
-           github.event.workflow_run.head_branch == 'bambu-signed-host' &&
-           github.event.workflow_run.head_repository.full_name == github.repository &&
-           github.event.workflow_run.event == 'pull_request') }}
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'bambu-signed-host' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.event == 'pull_request' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: dev-latest
       ARTIFACT: OrcaSlicer_Windows_Fast_Installer_x64
-      SEED_RUN_ID: '38000378561'
     steps:
       - name: Download approved successful build
         id: source
         shell: bash
         run: |
           set -euo pipefail
-          RUN_ID="$SEED_RUN_ID"
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            RUN_ID="${{ github.event.workflow_run.id }}"
-          fi
+          RUN_ID="${{ github.event.workflow_run.id }}"
           mkdir -p "$RUNNER_TEMP/unpacked"
           gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D "$RUNNER_TEMP/unpacked"
           SHA="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.head_sha')"
