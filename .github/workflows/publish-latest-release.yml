@@ -50,7 +50,6 @@ jobs:
           NOTES="$(printf 'Latest successful build from branch bambu-signed-host.\n\nSource commit: %s\nBuild: https://github.com/%s/actions/runs/%s\n' "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_RUN_ID")"
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "$RUNNER_TEMP/OrcaSlicer-Windows-x64-Installer.exe" --clobber -R "$GITHUB_REPOSITORY"
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$SOURCE_SHA" -F force=true >/dev/null
             gh release edit "$TAG" --notes "$NOTES" --prerelease -R "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" "$RUNNER_TEMP/OrcaSlicer-Windows-x64-Installer.exe" --target "$SOURCE_SHA" --title "OrcaSlicer – latest signed-host Windows x64" --notes "$NOTES" --prerelease -R "$GITHUB_REPOSITORY"
