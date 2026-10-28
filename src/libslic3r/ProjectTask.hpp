@@ -159,6 +159,13 @@ public:
     std::string                 model_id;
     std::string                 model_name;
     std::string                 profile_name;
+
+    // The 02.08.04 Bambu plug-in fills this class in place through get_subtask().
+    // New strings must remain in this ABI order; older plug-ins fill the prefix.
+    std::string                 design_title;
+    std::string                 title;
+    std::string                 instance_title;
+    std::string                 create_client;
 };
 
 class BBLSubTask {
