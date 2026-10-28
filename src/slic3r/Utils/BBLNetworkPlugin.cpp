@@ -19,6 +19,7 @@
 #include <utility>
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/FileTransferUtils.hpp"
+#include "slic3r/Utils/PluginVerifyRedirect.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include <cstddef>
 #include <cstring>
@@ -143,6 +144,8 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
                            : resolve_library_path(version);
 
 #if defined(_MSC_VER) || defined(_WIN32)
+    Slic3r::install_plugin_verify_redirect();
+
     wchar_t lib_wstr[256];
     memset(lib_wstr, 0, sizeof(lib_wstr));
     ::MultiByteToWideChar(CP_UTF8, NULL, library.c_str(), strlen(library.c_str())+1, lib_wstr, sizeof(lib_wstr) / sizeof(lib_wstr[0]));

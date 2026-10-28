@@ -167,6 +167,11 @@ elseif (UNIX AND NOT WIN32)
         INSTALL_RPATH "$ORIGIN/../libpython/lib")
 endif ()
 
+if (WIN32)
+    # The genuine signed Bambu launcher loads this module by its studio name.
+    set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "BambuStudio")
+endif ()
+
 if (NOT WIN32 AND NOT APPLE)
     # Binary name on unix like systems (Linux, Unix)
     set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "orca-slicer")
@@ -227,7 +232,7 @@ if (WIN32)
         OUTPUT_NAME "orca-slicer"
         WIN32_EXECUTABLE "$<NOT:$<CONFIG:RelWithDebInfo>>"
     )
-    target_link_libraries(OrcaSlicer_app_gui PRIVATE boost_headeronly)
+    target_link_libraries(OrcaSlicer_app_gui PRIVATE boost_headeronly Advapi32 Shell32 User32)
 endif ()
 
 # Link the resources dir to where Slic3r GUI expects it
