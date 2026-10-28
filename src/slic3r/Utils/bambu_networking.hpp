@@ -339,6 +339,60 @@ struct PrintParams {
     std::string     queue_plate_id;
 };
 
+// 02.08.01 expects PrintParams without queue_plate_id (by-value C++ ABI).
+struct PrintParams_020801 {
+    /* basic info */
+    std::string     dev_id;
+    std::string     task_name;
+    std::string     project_name;
+    std::string     preset_name;
+    std::string     filename;
+    std::string     config_filename;
+    int             plate_index;
+    std::string     ftp_folder;
+    std::string     ftp_file;
+    std::string     ftp_file_md5;
+    std::string     nozzle_mapping;
+    std::string     ams_mapping;
+    std::string     ams_mapping2;
+    std::string     ams_mapping_info;
+    std::string     nozzles_info;
+    std::string     connection_type;
+    std::string     comments;
+    int             origin_profile_id = 0;
+    int             stl_design_id = 0;
+    std::string     origin_model_id;
+    std::string     print_type;
+    std::string     dst_file;
+    std::string     dev_name;
+
+    /* access options */
+    std::string     dev_ip;
+    bool            use_ssl_for_ftp;
+    bool            use_ssl_for_mqtt;
+    std::string     username;
+    std::string     password;
+
+    /*user options */
+    bool            task_bed_leveling;      /* bed leveling of task */
+    bool            task_flow_cali;         /* flow calibration of task */
+    bool            task_vibration_cali;    /* vibration calibration of task */
+    bool            task_layer_inspect;     /* first layer inspection of task */
+    bool            task_record_timelapse;  /* record timelapse of task */
+    bool            task_timelapse_use_internal;
+    bool            task_use_ams;
+    std::string     task_bed_type;
+    std::string     extra_options;
+    int             auto_bed_leveling{ 0 };
+    int             auto_flow_cali{ 0 };
+    int             auto_offset_cali{ 0 };
+    int             extruder_cali_manual_mode{ -1 };
+    bool            task_ext_change_assist;
+    bool            try_emmc_print;
+    std::string     svc_context;
+    std::string     slicer_uid;
+};
+
 struct TaskQueryParams
 {
     std::string dev_id;
@@ -413,7 +467,8 @@ enum class NetworkAbi {
     Unsupported, // no generation in this build can call it - never dispatch through it
     Legacy,      // 01.10.01: PrintParams_Legacy; send_message/send_message_to_printer take no flag
     V0203,       // 02.03.00: PrintParams_0203; bind takes no dev_model
-    Current,     // 02.08.04: the layouts and signatures this build declares directly
+    V020801,     // 02.08.01: PrintParams without trailing queue_plate_id
+    Current,     // 02.08.02/02.08.04: current PrintParams with queue_plate_id
 };
 
 struct NetworkLibraryVersion {
@@ -426,12 +481,12 @@ struct NetworkLibraryVersion {
 };
 
 // Every row names the generation that can call it, so a series can never be offered without a
-// host-side ABI for it. Series with no generation - 02.08.01 (whose PrintParams lacks the
-// queue_plate_id that 02.08.02 appended, and whose malformed bind table macOS 27 refuses to
-// load), 02.01.01, 02.00.02 and older - must stay out; is_supported_network_version() is the
+// host-side ABI for it. Series with no generation - 02.01.01, 02.00.02 and older - must stay out; is_supported_network_version() is the
 // gate that keeps them from loading.
 static const NetworkLibraryVersion AVAILABLE_NETWORK_VERSIONS[] = {
     {"02.08.04", "02.08.04", nullptr, true, nullptr, NetworkAbi::Current},
+    {"02.08.02", "02.08.02", nullptr, false, nullptr, NetworkAbi::Current},
+    {"02.08.01", "02.08.01", nullptr, false, nullptr, NetworkAbi::V020801},
     {"02.03.00", "02.03.00", nullptr, false,
      "An older plug-in series. Features that need newer plug-in support, such as print-failure "
      "snapshots in the device error dialog, are unavailable.", NetworkAbi::V0203},
