@@ -1,13 +1,9 @@
-#include <boost/filesystem/operations.hpp>
 #include <catch2/catch_all.hpp>
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
-#include <vector>
-#include "libslic3r/AppConfig.hpp"
-#include <cstddef>
 
-#include <catch2/catch_test_macros.hpp>
+#include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 
 #include "plugin_test_utils.hpp"
@@ -78,68 +74,79 @@ TEST_CASE("Series and managed classification", "[NetworkVersions]")
 
 TEST_CASE_METHOD(PluginFolderFixture, "Managed builds fold into the series; customs are surfaced", "[NetworkVersions]")
 {
-    add_plugin("02.08.04.60");          // managed, same series -> folded into the 02.08.04 row
+    add_plugin("02.08.04.60");          // managed, latest series -> folded into the 02.08.04 row
+    add_plugin("02.08.02.54");          // managed, previous series -> folded into the 02.08.02 row
+    add_plugin("02.08.01.55");          // managed, previous series -> folded into the 02.08.01 row
     add_plugin("02.09.00.10");          // managed, unknown series -> not listed
-    add_plugin("02.08.01.55");          // managed, series this build no longer has an ABI for -> not listed
     add_plugin("02.03.00.62");          // managed, older whitelisted series -> folded into 02.03.00
     add_plugin("02.01.01.52");          // managed, series with no ABI in this build -> not listed
-    add_plugin("02.08.04_custom");      // custom, whitelisted series -> listed under it
-    add_plugin("02.08.04.52-dev");      // custom (dash-suffixed), whitelisted series -> listed
+    add_plugin("02.08.01_custom");      // custom, whitelisted series -> listed under it
+    add_plugin("02.08.01.52-dev");      // custom (dash-suffixed), whitelisted series -> listed
 
     auto versions = get_all_available_versions();
 
     // The specific managed build never gets its own row - the series represents it.
     REQUIRE(count_version(versions, "02.08.04.60") == 0);
     REQUIRE(count_version(versions, "02.08.04")    == 1);
-    REQUIRE(count_version(versions, "02.09.00.10") == 0);
+    REQUIRE(count_version(versions, "02.08.02.54") == 0);
+    REQUIRE(count_version(versions, "02.08.02")    == 1);
     REQUIRE(count_version(versions, "02.08.01.55") == 0);
-    REQUIRE(count_version(versions, "02.08.01")    == 0);
+    REQUIRE(count_version(versions, "02.08.01")    == 1);
+    REQUIRE(count_version(versions, "02.09.00.10") == 0);
     REQUIRE(count_version(versions, "02.03.00.62") == 0);
     REQUIRE(count_version(versions, "02.03.00")    == 1);
     REQUIRE(count_version(versions, "02.01.01.52") == 0);
     // Custom-named builds are distinct files kept under their own name.
-    REQUIRE(count_version(versions, "02.08.04_custom")  == 1);
-    REQUIRE(count_version(versions, "02.08.04.52-dev")  == 1);
+    REQUIRE(count_version(versions, "02.08.01_custom")  == 1);
+    REQUIRE(count_version(versions, "02.08.01.52-dev")  == 1);
 
-    // Newest series first, its customs nested under it (suffix sort: "" < ".52-dev" < "_custom"),
-    // then older series, legacy last.
+    // Newest series first. Customs stay nested under the 02.08.01 series
+    // (suffix sort: "" < ".52-dev" < "_custom"), then older series, legacy last.
     REQUIRE(versions[0].version == "02.08.04");
-    REQUIRE(versions[1].version == "02.08.04.52-dev");
-    REQUIRE(versions[2].version == "02.08.04_custom");
-    REQUIRE(versions[3].version == "02.03.00");
+    REQUIRE(versions[1].version == "02.08.02");
+    REQUIRE(versions[2].version == "02.08.01");
+    REQUIRE(versions[3].version == "02.08.01.52-dev");
+    REQUIRE(versions[4].version == "02.08.01_custom");
+    REQUIRE(versions[5].version == "02.03.00");
     REQUIRE(versions.back().version == BAMBU_NETWORK_AGENT_VERSION_LEGACY);
 
-    // An older whitelisted series is a flat row of its own, and never holds "(Latest)".
-    REQUIRE(versions[3].suffix.empty());
-    REQUIRE_FALSE(versions[3].is_latest);
+    // Older whitelisted series are flat rows of their own and never hold "(Latest)".
+    REQUIRE(versions[1].suffix.empty());
+    REQUIRE_FALSE(versions[1].is_latest);
+    REQUIRE(versions[2].suffix.empty());
+    REQUIRE_FALSE(versions[2].is_latest);
+    REQUIRE(versions[5].suffix.empty());
+    REQUIRE_FALSE(versions[5].is_latest);
 
     // Customs sort/render nested under their series (non-empty suffix, base = the series).
-    REQUIRE(versions[1].base_version == "02.08.04");
-    REQUIRE_FALSE(versions[1].suffix.empty());
-    REQUIRE(versions[2].base_version == "02.08.04");
-    REQUIRE_FALSE(versions[2].suffix.empty());
+    REQUIRE(versions[3].base_version == "02.08.01");
+    REQUIRE_FALSE(versions[3].suffix.empty());
+    REQUIRE(versions[4].base_version == "02.08.01");
+    REQUIRE_FALSE(versions[4].suffix.empty());
 
-    // "(Latest)" is the series row, never a nested custom build.
+    // "(Latest)" is the 02.08.04 series row, never an older or nested custom build.
     REQUIRE(versions[0].suffix.empty());
     REQUIRE(versions[0].is_latest);
     REQUIRE_FALSE(versions[1].is_latest);
     REQUIRE_FALSE(versions[2].is_latest);
+    REQUIRE_FALSE(versions[3].is_latest);
+    REQUIRE_FALSE(versions[4].is_latest);
 
-    // The stored default that drives download and update-check decisions is now the series.
+    // The stored default that drives download and update-check decisions is the newest supported series.
     REQUIRE(std::string(get_latest_network_version()) == "02.08.04");
 }
 
 TEST_CASE_METHOD(PluginFolderFixture, "Only the loaded series is marked installed", "[NetworkVersions]")
 {
-    add_plugin("02.08.04.60");
-    add_plugin("02.08.04_custom");
+    add_plugin("02.08.01.55");
+    add_plugin("02.08.01_custom");
 
-    // The loaded plug-in reports its full build (02.08.04.60); the series row is what gets marked.
+    // The loaded plug-in reports its full build (02.08.01.55); the series row is what gets marked.
     {
-        auto versions = get_all_available_versions("02.08.04.60");
+        auto versions = get_all_available_versions("02.08.01.55");
         int marked = 0;
         for (const auto& info : versions)
-            if (info.is_loaded) { ++marked; REQUIRE(info.version == "02.08.04"); }
+            if (info.is_loaded) { ++marked; REQUIRE(info.version == "02.08.01"); }
         REQUIRE(marked == 1);
     }
 
@@ -155,10 +162,10 @@ TEST_CASE_METHOD(PluginFolderFixture, "Only the loaded series is marked installe
 
     // A loaded custom build matches its own row, never the bare series.
     {
-        auto versions = get_all_available_versions("02.08.04_custom");
+        auto versions = get_all_available_versions("02.08.01_custom");
         int marked = 0;
         for (const auto& info : versions)
-            if (info.is_loaded) { ++marked; REQUIRE(info.version == "02.08.04_custom"); }
+            if (info.is_loaded) { ++marked; REQUIRE(info.version == "02.08.01_custom"); }
         REQUIRE(marked == 1);
     }
 
@@ -171,10 +178,16 @@ TEST_CASE("Only whitelisted series pass the load gate", "[NetworkVersions]")
 {
     // Each whitelisted series, its builds, and custom-named builds of that series.
     REQUIRE(is_supported_network_version("02.08.04"));
-    REQUIRE(is_supported_network_version("02.08.04.52"));
     REQUIRE(is_supported_network_version("02.08.04.60"));
     REQUIRE(is_supported_network_version("02.08.04_custom"));
-    REQUIRE(is_supported_network_version("02.08.04.52-dev"));
+    REQUIRE(is_supported_network_version("02.08.02"));
+    REQUIRE(is_supported_network_version("02.08.02.54"));
+    REQUIRE(is_supported_network_version("02.08.02_custom"));
+    REQUIRE(is_supported_network_version("02.08.01"));
+    REQUIRE(is_supported_network_version("02.08.01.52"));
+    REQUIRE(is_supported_network_version("02.08.01.55"));
+    REQUIRE(is_supported_network_version("02.08.01_custom"));
+    REQUIRE(is_supported_network_version("02.08.01.52-dev"));
     REQUIRE(is_supported_network_version("02.03.00"));
     REQUIRE(is_supported_network_version("02.03.00.62"));
     REQUIRE(is_supported_network_version("02.03.00.70"));
@@ -182,9 +195,6 @@ TEST_CASE("Only whitelisted series pass the load gate", "[NetworkVersions]")
     REQUIRE(is_supported_network_version(BAMBU_NETWORK_AGENT_VERSION_LEGACY));
 
     // Series whitelisted by previous Orca releases that no generation here can call.
-    REQUIRE_FALSE(is_supported_network_version("02.08.01"));
-    REQUIRE_FALSE(is_supported_network_version("02.08.01.55"));
-    REQUIRE_FALSE(is_supported_network_version("02.08.01_custom"));
     REQUIRE_FALSE(is_supported_network_version("02.01.01.52"));
     REQUIRE_FALSE(is_supported_network_version("02.00.02.50"));
 
@@ -206,7 +216,13 @@ TEST_CASE("Each version resolves to the ABI generation that can call it", "[Netw
     // custom-named ones - resolves to the same one.
     CHECK(network_plugin_abi("02.08.04")        == NetworkAbi::Current);
     CHECK(network_plugin_abi("02.08.04.60")     == NetworkAbi::Current);
-    CHECK(network_plugin_abi("02.08.04.52-dev") == NetworkAbi::Current);
+    CHECK(network_plugin_abi("02.08.04_custom") == NetworkAbi::Current);
+    CHECK(network_plugin_abi("02.08.02")        == NetworkAbi::Current);
+    CHECK(network_plugin_abi("02.08.02.54")     == NetworkAbi::Current);
+    CHECK(network_plugin_abi("02.08.02_custom") == NetworkAbi::Current);
+    CHECK(network_plugin_abi("02.08.01")        == NetworkAbi::V020801);
+    CHECK(network_plugin_abi("02.08.01.55")     == NetworkAbi::V020801);
+    CHECK(network_plugin_abi("02.08.01.52-dev") == NetworkAbi::V020801);
     CHECK(network_plugin_abi("02.03.00")        == NetworkAbi::V0203);
     CHECK(network_plugin_abi("02.03.00.62")     == NetworkAbi::V0203);
     CHECK(network_plugin_abi("02.03.00_custom") == NetworkAbi::V0203);
@@ -214,7 +230,6 @@ TEST_CASE("Each version resolves to the ABI generation that can call it", "[Netw
 
     // Anything the load gate rejects must dispatch through nothing at all, rather than
     // defaulting to a layout it does not share.
-    CHECK(network_plugin_abi("02.08.01.55") == NetworkAbi::Unsupported);
     CHECK(network_plugin_abi("02.01.01.52") == NetworkAbi::Unsupported);
     CHECK(network_plugin_abi("02.00.02.50") == NetworkAbi::Unsupported);
     CHECK(network_plugin_abi("02.09.00.10") == NetworkAbi::Unsupported);

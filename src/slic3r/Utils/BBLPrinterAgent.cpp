@@ -416,6 +416,7 @@ int BBLPrinterAgent::bind(std::string dev_ip, std::string dev_id, std::string de
             auto older_func = as_abi<func_bind_pre0208>(func);
             return older_func(agent, dev_ip, dev_id, sec_link, timezone, improved, update_fn);
         }
+        case NetworkAbi::V020801:
         case NetworkAbi::Current:
             return func(agent, dev_ip, dev_id, dev_model, sec_link, timezone, improved, update_fn);
         default:
