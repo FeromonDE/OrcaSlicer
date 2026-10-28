@@ -137,6 +137,13 @@ typedef int (*func_start_local_print_with_record_0203)(void *agent, PrintParams_
 typedef int (*func_start_send_gcode_to_sdcard_0203)(void *agent, PrintParams_0203 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
 typedef int (*func_start_local_print_0203)(void *agent, PrintParams_0203 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn);
 typedef int (*func_start_sdcard_print_0203)(void* agent, PrintParams_0203 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn);
+// 02.08.01 uses the same start_* entry points but a shorter by-value PrintParams.
+typedef int (*func_start_print_020801)(void *agent, PrintParams_020801 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
+typedef int (*func_start_local_print_with_record_020801)(void *agent, PrintParams_020801 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
+typedef int (*func_start_send_gcode_to_sdcard_020801)(void *agent, PrintParams_020801 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn);
+typedef int (*func_start_local_print_020801)(void *agent, PrintParams_020801 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn);
+typedef int (*func_start_sdcard_print_020801)(void* agent, PrintParams_020801 params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn);
+
 
 // bind() gained dev_model in 02.08.01; the legacy and 02.03.00 series share the older form.
 typedef int (*func_bind_pre0208)(void *agent, std::string dev_ip, std::string dev_id, std::string sec_link, std::string timezone, bool improved, OnUpdateStatusFn update_fn);
@@ -425,6 +432,7 @@ public:
     // Both move out of `param`, so convert only inside the branch that will actually run.
     static PrintParams_Legacy as_legacy(PrintParams& param);
     static PrintParams_0203 as_0203(PrintParams& param);
+    static PrintParams_020801 as_020801(PrintParams& param);
 
 private:
     // Singleton instance pointer (heap-allocated for explicit lifetime control)
