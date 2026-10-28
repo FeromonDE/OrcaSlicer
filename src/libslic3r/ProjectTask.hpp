@@ -160,6 +160,14 @@ public:
     std::string                 model_id;
     std::string                 model_name;
     std::string                 profile_name;
+
+// The Bambu 02.08.04 plug-in fills BBLModelTask in place through get_subtask().
+// These trailing members must retain its ABI order. Older plug-ins only fill
+// the original prefix and leave these strings default-constructed.
+    std::string                 design_title;
+    std::string                 title;
+    std::string                 instance_title;
+    std::string                 create_client;
 };
 
 class BBLSubTask {
