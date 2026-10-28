@@ -688,21 +688,12 @@ namespace Slic3r
 
                     return true;
                 }
-                // same dev_id, lan => disconnect and reconnect
+                // Keep the already active LAN session when selecting the same printer.
+                // An unnecessary disconnect/reconnect can invalidate callbacks in flight.
                 else
                 {
                     BOOST_LOG_TRIVIAL(info) << "set_selected_machine: same lan machine, dev_id =" << dev_id
-                        << ", disconnect and reconnect";
-
-                    // lan mode printer reconnect printer
-                    if (m_agent)
-                    {
-                        m_agent->disconnect_printer();
-                        it->second->reset();
-
-                        it->second->connect();
-                        it->second->set_lan_mode_connection_state(true);
-                    }
+                                            << ", keep existing connection";
                 }
             }
             else
