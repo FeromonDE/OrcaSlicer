@@ -6,6 +6,7 @@
 
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/log/trivial.hpp>
+#include <atomic>
 
 
 namespace Slic3r { 
@@ -146,6 +147,7 @@ public:
     static int MaxSendingAtSameTime;
     static int SendingInterval;
     TaskManager(NetworkAgent* agent);
+    void set_agent(NetworkAgent* agent);
 
     int start_print(const std::vector<PrintParams>& params, TaskSettings* settings = nullptr);
 
@@ -173,7 +175,8 @@ private:
     std::vector<boost::thread*>   m_sending_thread_list;
     std::mutex                    m_scedule_mutex;
     bool                        m_started { false };
-    NetworkAgent*               m_agent { nullptr };
+    // Updated on networking reload, read by sending threads.
+    std::atomic<NetworkAgent*>  m_agent { nullptr };
 
     std::chrono::system_clock::time_point last_sent_timestamp;
 };

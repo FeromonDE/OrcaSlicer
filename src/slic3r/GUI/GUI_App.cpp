@@ -3746,15 +3746,9 @@ bool GUI_App::on_init_network(bool try_backup)
         if (config_version.empty()) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": no version configured, need to download";
             m_networking_need_update = true;
-
-            if (!m_device_manager)
-                m_device_manager = new Slic3r::DeviceManager();
-            if (!m_user_manager)
-                m_user_manager = new Slic3r::UserManager();
-
-            return false;
-        }
-
+            // Still construct the cloud/network agent and device managers below.
+            // Otherwise skipping the plug-in download leaves m_agent null.
+        } else {
         int load_agent_dll = Slic3r::NetworkAgent::initialize_network_module(false, config_version);
     __retry:
         if (!load_agent_dll) {
@@ -3822,6 +3816,7 @@ bool GUI_App::on_init_network(bool try_backup)
                 m_networking_need_update = true;
             }
         }
+        } // config_version is not empty
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", create network agent...");
@@ -3844,6 +3839,10 @@ bool GUI_App::on_init_network(bool try_backup)
         m_user_manager = new Slic3r::UserManager(m_agent);
     else
         m_user_manager->set_agent(m_agent);
+
+    // The task manager survives networking reloads: refresh the agent it uses.
+    if (m_task_manager)
+        m_task_manager->set_agent(m_agent);
 
     if (this->is_enable_multi_machine()) {
         if (!m_task_manager) {
