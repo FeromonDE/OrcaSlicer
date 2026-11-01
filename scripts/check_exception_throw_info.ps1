@@ -18,7 +18,8 @@
 
 .PARAMETER BuildDir
     The slicer build directory. Its CMakeCache.txt names the compiler, and its src\<Config>
-    holds the PDBs to check, which must include OrcaSlicer.pdb.
+    holds the PDBs to check, including the slicer DLL PDB: OrcaSlicer.pdb or
+    BambuStudio.pdb (the signed Bambu launcher build).
 
 .PARAMETER Config
     The configuration whose PDBs to check (default: Release).
@@ -76,10 +77,14 @@ if (-not $Dump) {
 
     $Pdb = Split-PathList $Pdb
     if (-not $Pdb) {
-        # OrcaSlicer.dll holds the slicer itself, so a check without it proves nothing.
+        # The slicer's main DLL must have debug information. The signed Bambu host build
+        # renames OrcaSlicer.dll to BambuStudio.dll; the small orca-slicer.exe launcher
+        # is not sufficient evidence on its own.
         $pdbDir = Join-Path $BuildDir "src\$Config"
-        if (-not (Test-Path (Join-Path $pdbDir 'OrcaSlicer.pdb'))) {
-            throw "No OrcaSlicer.pdb in $pdbDir."
+        $mainDllPdbs = @('BambuStudio.pdb', 'OrcaSlicer.pdb')
+        $mainPdb = @($mainDllPdbs | Where-Object { Test-Path (Join-Path $pdbDir $_) })
+        if ($mainPdb.Count -eq 0) {
+            throw "No slicer DLL PDB (BambuStudio.pdb or OrcaSlicer.pdb) in $pdbDir."
         }
         $Pdb = @(Get-ChildItem $pdbDir -Filter *.pdb | ForEach-Object FullName)
     }
