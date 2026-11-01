@@ -1,0 +1,41 @@
+name: OrcaSlicer 2.5 RC Windows x64 validation build
+
+on:
+  push:
+    branches:
+      - ci/rc-250-windows-x64-20261101
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  verify_build_script:
+    name: Verify Windows build script
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+      - name: Run build script tests
+        shell: powershell
+        run: .\scripts\test_build_win.ps1
+
+  prepare_dependencies:
+    name: Restore or build Windows x64 dependencies
+    needs: verify_build_script
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-latest
+      arch: x64
+      compiler: clang
+      build-deps-only: false
+    secrets: inherit
+
+  build_windows_x64:
+    name: Compile and package RC Windows x64
+    needs: prepare_dependencies
+    uses: ./.github/workflows/build_windows_fast.yml
+    secrets: inherit
