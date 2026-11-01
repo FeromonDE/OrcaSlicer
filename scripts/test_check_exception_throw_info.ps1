@@ -35,7 +35,7 @@ Write-Dump "$work\clean.txt" @($copy, $trivial)
 Write-Dump "$work\empty.txt" @()
 Write-Dump "$work\a dir, with a comma\clean.txt" @($copy)
 
-# A build directory whose compiler has an llvm-pdbutil beside it but no OrcaSlicer.pdb.
+# A build whose only PDB belongs to the launcher, not the main slicer DLL.
 # Nothing runs the stand-in; the check stops before it gets there.
 $build = "$work\build"
 New-Item -ItemType Directory -Force -Path "$build\bin", "$build\src\Release" | Out-Null
@@ -57,8 +57,8 @@ $cases = @(
        Exit = 1; Contains = @('broken.txt: 2 exception classes', 'clean.txt: 2 exception classes') }
     @{ Name = 'a path with a comma stays whole'; Args = @('-Dump', "$work\a dir, with a comma\clean.txt")
        Exit = 0; Contains = @('clean.txt: 1 exception classes') }
-    @{ Name = 'a build without OrcaSlicer.pdb fails'; Args = @('-BuildDir', $build)
-       Exit = 1; Contains = @('No OrcaSlicer.pdb in') }
+    @{ Name = 'a build without the main slicer DLL PDB fails'; Args = @('-BuildDir', $build)
+       Exit = 1; Contains = @('No slicer DLL PDB (BambuStudio.pdb or OrcaSlicer.pdb) in') }
     @{ Name = 'a compiler that is not on PATH is named'; Args = @('-BuildDir', $bare)
        Exit = 1; Contains = @('no-such-clang-cl.exe, the compiler in') }
     @{ Name = 'a missing build directory is named'; Args = @('-BuildDir', "$work\nowhere")
