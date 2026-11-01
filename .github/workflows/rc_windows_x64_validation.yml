@@ -10,6 +10,10 @@ permissions:
   contents: read
   actions: write
 
+concurrency:
+  group: rc-windows-x64-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify_build_script:
     name: Verify Windows build script
@@ -23,8 +27,8 @@ jobs:
         shell: powershell
         run: .\scripts\test_build_win.ps1
 
-  prepare_dependencies:
-    name: Restore or build Windows x64 dependencies
+  build_windows_x64:
+    name: Build OrcaSlicer RC Windows x64
     needs: verify_build_script
     uses: ./.github/workflows/build_check_cache.yml
     with:
@@ -32,10 +36,4 @@ jobs:
       arch: x64
       compiler: clang
       build-deps-only: false
-    secrets: inherit
-
-  build_windows_x64:
-    name: Compile and package RC Windows x64
-    needs: prepare_dependencies
-    uses: ./.github/workflows/build_windows_fast.yml
     secrets: inherit
