@@ -12,7 +12,6 @@
 #include <system_error>
 #include <wx/event.h>
 #include <map>
-#include "slic3r/GUI/Printer/BambuTunnel.h"
 #include <vector>
 #include <cassert>
 #include <utility>
