@@ -750,6 +750,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CloudDeleteQueue.hpp
     Utils/ColorSpaceConvert.cpp
     Utils/ColorSpaceConvert.hpp
+    Utils/CrealityCfs.cpp
+    Utils/CrealityCfs.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
     Utils/CrealityPrintAgent.cpp
@@ -940,8 +942,7 @@ if (WIN32)
     target_include_directories(libslic3r_gui SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)
     target_link_libraries(libslic3r_gui Advapi32)
 
-    # The signed Bambu network plug-in uses the authentic Windows x64 Bambu host.
-    # MinHook is only built for the x64 signed-host bridge, never for Windows ARM64.
+    # Signed Bambu Windows x64 bridge, unavailable on Windows ARM64.
     if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64|ARM64EC)$")
         include(FetchContent)
         FetchContent_Declare(minhook

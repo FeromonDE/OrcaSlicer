@@ -6650,7 +6650,8 @@ int CLI::run(int argc, char **argv)
                                                             // Only check for single-color object
                                                             for (size_t j = 0; j < inside_extruders.size(); ++j) {
                                                                 if (!inside_extruders[j]) {
-                                                                    std::vector<int> filaments = vol->get_extruders();
+                                                                    // A mixed filament prints with its component filaments.
+                                                                    const std::vector<int> filaments = expand_mixed_filament_ids(vol->get_extruders(), m_print_config);
                                                                     unprintable_filament_ids[j].insert(filaments.begin(), filaments.end());
                                                                 }
                                                             }
@@ -8595,7 +8596,7 @@ extern "C" {
         return CLI().run(argc, argv_ptrs.data());
     }
 
-    // Entry point expected by the genuine Bambu Studio signed Windows launcher.
+    // Export expected by the genuine signed Bambu Studio Windows launcher.
     __declspec(dllexport) int __stdcall bambustu_main(int argc, wchar_t **argv)
     {
         return orcaslicer_main(argc, argv);
