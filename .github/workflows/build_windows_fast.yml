@@ -35,15 +35,6 @@ jobs:
             windows-x64-clang-cache-orcaslicer_deps-build-
           fail-on-cache-miss: false
 
-      - name: Verify dependency cache
-        shell: pwsh
-        run: |
-          $deps = "${{ github.workspace }}/deps/build/OrcaSlicer_dep"
-          if (-not (Test-Path $deps)) {
-            throw "No compatible Windows x64 clang dependency cache is available."
-          }
-          Write-Host "Using dependency cache: ${{ steps.deps_cache.outputs.cache-matched-key }}"
-
       - uses: lukka/get-cmake@latest
         with:
           cmakeVersion: "~4.3.0"
@@ -103,6 +94,30 @@ jobs:
 
       - name: Setup MSVC
         uses: microsoft/setup-msbuild@v3
+
+      # Caches are scoped to a branch in GitHub Actions. A new release branch
+      # cannot see cached dependencies from the old CI validation branch.
+      - name: Build missing Windows x64 dependencies
+        if: ${{ steps.deps_cache.outputs.cache-hit != 'true' }}
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          choco install strawberryperl --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Failed to install Strawberry Perl." }
+          $deps = (Split-Path "${{ github.workspace }}/deps/build/OrcaSlicer_dep").Replace('\', '/')
+          .\build_win.bat -d --arch x64 --deps-dir $deps -l -x
+          if ($LASTEXITCODE -ne 0) { throw "Windows dependencies build failed." }
+          if (-not (Test-Path "${{ github.workspace }}/deps/build/OrcaSlicer_dep/usr/local")) {
+            throw "Windows dependency install folder was not produced."
+          }
+
+      - name: Cache Windows x64 dependencies
+        if: ${{ steps.deps_cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: windows-x64-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}
 
       - name: Install NSIS
         shell: pwsh
