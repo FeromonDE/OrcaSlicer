@@ -1,5 +1,6 @@
 name: Build and publish OrcaSlicer 2.5.0 signed-host Windows x64
 
+# Retry after adding dependency-cache bootstrap for this new branch.
 # One-time push trigger: creating this workflow on the final branch starts the
 # installer-only build. Later edits to the source do not trigger costly builds.
 on:
