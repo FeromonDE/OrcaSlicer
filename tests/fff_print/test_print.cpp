@@ -41,6 +41,7 @@
 #include <map>
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Exception.hpp"
@@ -1142,6 +1143,49 @@ TEST_CASE("Sequential printing follows model order", "[Print]")
     REQUIRE_THAT(first_object_peak_z, Catch::Matchers::WithinAbs(20.0, 0.3));
 }
 
+TEST_CASE("By-layer As object list keeps copies of one object in their list order", "[Print]")
+{
+    // validate() numbers the instances through sort_object_instances_by_model_order(print, true). Copies
+    // of one object used to all share one order key, and print.objects() does not list them in list order:
+    // every second copy is rotated here, which splits them into separate PrintObjects. The G-code export
+    // and the sequence labels print in the order those numbers assign.
+    std::vector<TriangleMesh> meshes;
+    meshes.push_back(make_cube(5, 5, 2));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",     "by layer" },
+        { "print_order",        "as_obj_list" },
+        { "skirt_loops",        0 },
+        { "layer_change_gcode", "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    Test::init_print(std::move(meshes), print, model, config, nullptr, /*arrange=*/false, /*instances=*/200);
+    const ModelInstancePtrs &instances = model.objects.front()->instances;
+    for (size_t k = 0; k < instances.size(); ++k) {
+        instances[k]->set_offset(Vec3d(10. + 12. * double(k % 15), 10. + 12. * double(k / 15), instances[k]->get_offset().z()));
+        if (k % 2 != 0)
+            instances[k]->set_rotation(Vec3d(0., 0., PI / 2));
+    }
+    print.apply(model, config);
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+
+    // validate() numbered the instances it ordered; copies must be numbered in list order.
+    const ModelInstancePtrs &copies = print.model().objects.front()->instances;
+    for (size_t k = 0; k < copies.size(); ++k)
+        REQUIRE(copies[k]->arrange_order == int(k + 1));
+
+    // The As object list path of the G-code export orders the instances from those numbers.
+    const std::vector<const PrintInstance *> ordered = sort_object_instances_by_model_order(print);
+    REQUIRE(ordered.size() == copies.size());
+    for (size_t k = 0; k < copies.size(); ++k)
+        REQUIRE(ordered[k]->model_instance == copies[k]);
+}
+
 // A sequential (by-object) print must publish the print-level nozzle group result just
 // like a by-layer print, so custom g-code can index the per-nozzle placeholder tables
 // (e.g. nozzle_diameter_at_nozzle_id[]) instead of failing on an empty vector.
@@ -1253,9 +1297,14 @@ TEST_CASE("Belt printers refuse an object taller than the gantry clearance", "[P
 // On a belt every tilted layer starts on the belt, so "the first layers" the fan stays off
 // for are a band along the belt, not the first slicing layers. The generator marks where
 // each extrusion segment enters and leaves that band and the cooling buffer keeps the fan
-// off inside it, on every layer.
+// off inside it, on every layer. The lowest wall of each tilted layer rests on the belt with
+// its nozzle half a layer plus half its width up (0.1 + 0.21 mm here), so a band of one
+// first layer has to be judged from the bead, not the nozzle, to hold it.
 TEST_CASE("Belt printers keep the part fan off within the band above the belt", "[Print][belt][Cooling]")
 {
+    // Fan-off layers, and the gantry Y below which an extrusion is well inside that band.
+    const auto [fan_off_layers, band_y] = GENERATE(table<int, double>({ { 1, 0.35 }, { 3, 0.45 } }));
+    CAPTURE(fan_off_layers);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         { "belt_printer",                 1 },
@@ -1268,9 +1317,8 @@ TEST_CASE("Belt printers keep the part fan off within the band above the belt", 
         { "initial_layer_print_height",   0.2 },
         { "skirt_loops",                  0 },
         { "z_hop",                        0 },
-        // Three layers, 0.6 mm: the lowest wall of each tilted layer is centred about 0.3 mm
-        // above the belt (half a line width in from the contact edge).
-        { "close_fan_the_first_x_layers", 3 },
+        { "outer_wall_line_width",        0.42 },
+        { "close_fan_the_first_x_layers", fan_off_layers },
         { "full_fan_speed_layer",         0 },
         { "fan_min_speed",                100 },
         { "fan_max_speed",                100 },
@@ -1287,9 +1335,9 @@ TEST_CASE("Belt printers keep the part fan off within the band above the belt", 
     CHECK(gcode.find(";_BELT_BAND") == std::string::npos);
 
     // With this axis mapping machine Y is the height above the belt along the gantry. Walk
-    // the moves with the fan state: extrusions that stay within 0.45 mm of the belt are well
-    // inside the band and must print with the fan off; extrusions that stay 5 mm clear of it
-    // must print with it on. The first three slicing layers have the fan off altogether.
+    // the moves with the fan state: extrusions that stay below band_y are well inside the band
+    // and must print with the fan off; extrusions that stay 5 mm clear of it must print with
+    // it on. The first fan_off_layers slicing layers have the fan off altogether.
     size_t in_band = 0, in_band_fan_on = 0, clear = 0, clear_fan_off = 0;
     int    layer   = -1;
     bool   fan_on  = false;
@@ -1311,8 +1359,8 @@ TEST_CASE("Belt printers keep the part fan off within the band above the belt", 
                 continue;
             const double y_new     = std::atof(cmd.c_str() + ypos + 2);
             const bool   extruding = epos != std::string::npos && std::atof(cmd.c_str() + epos + 2) > 0.;
-            if (extruding && layer >= 3) {
-                if (std::max(y, y_new) < 0.45) {
+            if (extruding && layer >= fan_off_layers) {
+                if (std::max(y, y_new) < band_y) {
                     ++ in_band;
                     in_band_fan_on += fan_on;
                 } else if (std::min(y, y_new) > 5.) {
@@ -1327,6 +1375,144 @@ TEST_CASE("Belt printers keep the part fan off within the band above the belt", 
     CHECK(in_band_fan_on == 0);
     CHECK(clear > 20);
     CHECK(clear_fan_off == 0);
+}
+
+// On a belt one wall loop runs from the belt up the part, and whether a path is on the first
+// layer, and its step of the slow_down_layers ramp, set its speed, flow and acceleration as a
+// whole.  Each part of the loop must take the settings of its own height above the belt,
+// wherever the seam starts the loop.
+TEST_CASE("Belt printers use first-layer settings only where a wall rests on the belt", "[Print][belt][Regression]")
+{
+    const std::string seam             = GENERATE("back", "random");
+    const int         slow_down_layers = GENERATE(0, 4);
+    CAPTURE(seam, slow_down_layers);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "belt_printer",                   1 },
+        { "belt_slice_rotation",            "x" },
+        { "belt_slice_rotation_angle",      45 },
+        { "gcode_remap_x",                  "rev_x" },
+        { "gcode_remap_y",                  "pos_z" },
+        { "gcode_remap_z",                  "pos_y" },
+        { "layer_height",                   0.2 },
+        { "initial_layer_print_height",     0.2 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "z_hop",                          0 },
+        { "wall_generator",                 "classic" },
+        { "outer_wall_line_width",          0.42 },
+        { "seam_position",                  seam },
+        // One path per wall loop, so nothing but the edges of the bands cut it.
+        { "detect_overhang_wall",           0 },
+        { "enable_overhang_speed",          0 },
+        { "initial_layer_speed",            10 },
+        { "outer_wall_speed",               40 },
+        { "slow_down_layers",               slow_down_layers },
+        { "filament_max_volumetric_speed",  20 },
+        { "slow_down_for_layer_cooling",    0 },
+        { "set_other_flow_ratios",          1 },
+        { "first_layer_flow_ratio",         0.8 },
+        { "machine_start_gcode",            "T[initial_tool]\n" },
+        { "layer_change_gcode",             "G92 E0\n" },
+    });
+    const std::string gcode = slice({ cube(20) }, config);
+
+    // As above, machine Y is the height above the belt.  The outer wall's nozzle is half its
+    // width, 0.21 mm, higher than the belt under its edge, so the first layer, up to 0.2 mm,
+    // ends at Y = 0.41 and step k of the ramp spans Y = 0.21 + [0.2 k, 0.2 (k + 1)).  Its wall
+    // resting on the belt is at Y = 0.31.
+    const double ramp_step_2 = 10. + (40. - 10.) * 2. / 4.;
+    std::vector<double> in_band_e, clear_e;   // E per mm
+    size_t              in_band = 0, in_band_fast = 0, step_2 = 0, step_2_off = 0, clear = 0, clear_slow = 0;
+    std::string         type;
+    GCodeReader         reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (boost::starts_with(line.raw(), ";TYPE:")) {
+            type = line.raw().substr(6);
+            return;
+        }
+        if (type != "Outer wall" || ! line.extruding(self) || line.dist_XY(self) <= EPSILON)
+            return;
+        const double y_lo = std::min(self.y(), line.new_Y(self));
+        const double y_hi = std::max(self.y(), line.new_Y(self));
+        const double f    = line.new_F(self);
+        // Long moves only for the flow, so that the rounding of E does not blur it.
+        const bool   long_move = line.dist_XY(self) >= 0.5;
+        if (y_hi < 0.35) {
+            ++ in_band;
+            in_band_fast += std::abs(f - 10. * 60.) > 1.;
+            if (long_move)
+                in_band_e.push_back(line.dist_E(self) / line.dist_XY(self));
+        } else if (slow_down_layers == 4 && y_lo > 0.61 - 1e-3 && y_hi < 0.81 + 1e-3) {
+            ++ step_2;
+            step_2_off += std::abs(f - ramp_step_2 * 60.) > 1.;
+        } else if (y_lo > 1.5) {
+            ++ clear;
+            clear_slow += std::abs(f - 40. * 60.) > 1.;
+            if (long_move)
+                clear_e.push_back(line.dist_E(self) / line.dist_XY(self));
+        }
+    });
+    REQUIRE(in_band > 20);
+    REQUIRE(clear > 20);
+    CHECK(in_band_fast == 0);
+    CHECK(clear_slow == 0);
+    if (slow_down_layers == 4) {
+        REQUIRE(step_2 > 10);
+        CHECK(step_2_off == 0);
+    }
+    // first_layer_flow_ratio on the belt and nowhere else.
+    auto median = [](std::vector<double> v) {
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
+    };
+    CHECK_THAT(median(in_band_e) / median(clear_e), Catch::Matchers::WithinRel(0.8, 0.02));
+}
+
+// Small-area flow compensation scales a line's flow by the line's length.  The cuts a belt path
+// gets at the edges of the bands above the belt must not make it see the pieces as short lines.
+TEST_CASE("Belt band cuts leave small-area flow compensation unchanged", "[Print][belt][Regression]")
+{
+    // Plastic per role.  The slow_down_layers ramp adds band edges every 0.2 mm above the belt,
+    // here up to well past the top of the part, and with them cuts through the solid infill
+    // under its top face, but changes nothing else about how much plastic is laid.
+    auto plastic = [](int slow_down_layers) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "belt_printer",                        1 },
+            { "belt_slice_rotation",                 "x" },
+            { "belt_slice_rotation_angle",           45 },
+            { "gcode_remap_x",                       "rev_x" },
+            { "gcode_remap_y",                       "pos_z" },
+            { "gcode_remap_z",                       "pos_y" },
+            { "layer_height",                        0.2 },
+            { "initial_layer_print_height",          0.2 },
+            { "skirt_loops",                         0 },
+            { "brim_type",                           "no_brim" },
+            { "z_hop",                               0 },
+            { "bottom_shell_layers",                 4 },
+            { "internal_solid_infill_pattern",       "monotonic" },
+            { "small_area_infill_flow_compensation", 1 },
+            { "slow_down_layers",                    slow_down_layers },
+            { "machine_start_gcode",                 "T[initial_tool]\n" },
+            { "layer_change_gcode",                  "G92 E0\n" },
+        });
+        std::map<std::string, double> e;
+        std::string                   type;
+        GCodeReader                   reader;
+        reader.parse_buffer(slice({ cube(20) }, config), [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (boost::starts_with(line.raw(), ";TYPE:"))
+                type = line.raw().substr(6);
+            else if (line.extruding(self) && line.dist_XY(self) > EPSILON)
+                e[type] += line.dist_E(self);
+        });
+        return e;
+    };
+    const std::map<std::string, double> uncut = plastic(0);
+    const std::map<std::string, double> cut   = plastic(200);
+    REQUIRE(uncut.count("Internal solid infill") == 1);
+    REQUIRE(cut.count("Internal solid infill") == 1);
+    CHECK_THAT(cut.at("Internal solid infill"), Catch::Matchers::WithinRel(uncut.at("Internal solid infill"), 1e-4));
 }
 
 // Organic supports under an overhang on a belt printer reach below the object's first layer,
@@ -2192,4 +2378,50 @@ TEST_CASE("Objects on extruders with different layer height limits can share a p
     const StringObjectException error = print.validate();
     INFO(error.string);
     CHECK(error.string.empty());
+}
+
+TEST_CASE("Belt printers apply the Z shrinkage compensation to the slicing height once", "[Print][belt][Regression]")
+{
+    // A 20 mm cube printed with a filament that shrinks to xy % / z % is sliced like an uncompensated box
+    // 20 * 100 / xy wide and 20 * 100 / z tall. The span of the layers is compared, as the belt Z offset
+    // depends on where the object is centred.
+    const auto [xy, z, angle] = GENERATE(table<double, double, double>({ { 100., 95., 45. }, { 100., 105., 45. }, { 90., 95., 45. }, { 100., 105., 0. } }));
+    const auto sliced_height = [](const TriangleMesh &mesh, double xy, double z, double angle) {
+        DynamicPrintConfig config = belt_test_config();
+        config.set_deserialize_strict({ { "filament_shrink", xy }, { "filament_shrinkage_compensation_z", z }, { "belt_slice_rotation_angle", angle } });
+        Print print;
+        init_and_process_print({ mesh }, print, config);
+        const PrintObject &object = *print.objects().front();
+        return std::make_pair(object.slicing_parameters().object_print_z_max,
+                              object.layers().back()->print_z - object.layers().front()->print_z);
+    };
+
+    const auto [compensated_max_z, compensated_span] = sliced_height(cube(20.), xy, z, angle);
+    const auto [expected_max_z, expected_span]       = sliced_height(make_cube(20. * 100. / xy, 20. * 100. / xy, 20. * 100. / z), 100., 100., angle);
+    CHECK_THAT(compensated_max_z, Catch::Matchers::WithinAbs(expected_max_z, EPSILON));
+    CHECK_THAT(compensated_span, Catch::Matchers::WithinAbs(expected_span, 0.2 * 100. / z));
+}
+
+TEST_CASE("The belt build height check uses the compensated height", "[Print][belt][validate][Regression]")
+{
+    // printable_height is 100 mm. Z shrinkage 105 % prints 101 mm at about 96.2 mm, which fits, and 106 mm at
+    // about 101 mm, which does not; with 95 % a 97 mm object only becomes too tall through the compensation.
+    const auto [z, height, expected] = GENERATE(table<double, double, std::string>({
+        { 105., 101., "" },
+        { 105., 106., "exceeds the maximum build volume height." },
+        { 95., 92., "" },
+        { 95., 97., "because of material shrinkage compensation" },
+    }));
+    DynamicPrintConfig config = belt_test_config();
+    config.set_deserialize_strict({ { "printable_height", 100. }, { "filament_shrinkage_compensation_z", z } });
+
+    Print print;
+    Model model;
+    init_print({ make_cube(20., 20., height) }, print, model, config);
+    const std::string error = print.validate().string;
+    INFO(error);
+    if (expected.empty())
+        CHECK(error.empty());
+    else
+        CHECK(error.find(expected) != std::string::npos);
 }

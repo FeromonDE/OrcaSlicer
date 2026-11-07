@@ -19,13 +19,13 @@ concurrency:
 jobs:
   build_windows_fast:
     name: Fast Windows x64 installer
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'bambu-signed-host-2.5-beta' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_name == 'bambu-signed-host-2.5-final' }}
     uses: ./.github/workflows/build_windows_fast.yml
     secrets: inherit
 
   check_build_script:
     name: Windows build script tests
-    if: ${{ github.ref_name != 'bambu-signed-host-2.5-beta' }}
+    if: ${{ github.ref_name != 'bambu-signed-host-2.5-final' }}
     runs-on: windows-latest
     steps:
       - name: Checkout
