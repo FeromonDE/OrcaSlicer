@@ -1,8 +1,7 @@
 name: Build and publish OrcaSlicer 2.5.0 signed-host Windows x64
 
-# Retry after adding dependency-cache bootstrap for this new branch.
-# One-time push trigger: creating this workflow on the final branch starts the
-# installer-only build. Later edits to the source do not trigger costly builds.
+# Installer-only release build, explicitly triggered for ABI 02.09.01 support.
+# The workflow runs on edits to this file only, not on general source pushes.
 on:
   push:
     branches:
@@ -62,15 +61,16 @@ jobs:
           **OrcaSlicer 2.5.0 final — signed Bambu Studio host fork (Windows x64).**
 
           Based on upstream OrcaSlicer v2.5.0, with the custom genuine Bambu Studio
-          host bridge, official Bambu networking plug-in support for verified 02.08.x
-          ABI generations, Storage Cache v2 and current-print thumbnail retained.
+          host bridge, Bambu networking ABI routing for 02.09.01 and earlier 02.08.x
+          generations, Storage Cache v2 and current-print thumbnail retained.
 
           This is an **unofficial fork**. Signed-host describes the Bambu host
           mechanism; it does not mean that this installer is code-signed by Bambu Lab.
           Install Bambu Studio to provide the authentic signed host files.
 
           Included asset: one Windows x64 NSIS installer only. No portable zip.
-          Bambu Networking 02.09.01 compatibility has not been verified.
+          Bambu Networking 02.09.01 has matching published function signatures and
+          PrintParams layout. Actual loading and printing require runtime verification.
 
           Upstream release: https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.0
           NOTES
