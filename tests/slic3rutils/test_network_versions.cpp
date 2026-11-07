@@ -77,7 +77,7 @@ TEST_CASE("Series and managed classification", "[NetworkVersions]")
 TEST_CASE_METHOD(PluginFolderFixture, "Managed builds fold into the series; customs are surfaced", "[NetworkVersions]")
 {
     add_plugin("02.09.01.54");          // managed newest series -> folded into 02.09.01
-    add_plugin("02.08.04.60");          // managed, latest series -> folded into the 02.08.04 row
+    add_plugin("02.08.04.60");          // managed, older series -> folded into the 02.08.04 row
     add_plugin("02.08.02.54");          // managed, previous series -> folded into the 02.08.02 row
     add_plugin("02.08.01.55");          // managed, previous series -> folded into the 02.08.01 row
     add_plugin("02.09.00.10");          // managed, unknown series -> not listed
