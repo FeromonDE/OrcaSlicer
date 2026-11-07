@@ -468,7 +468,7 @@ enum class NetworkAbi {
     Legacy,      // 01.10.01: PrintParams_Legacy; send_message/send_message_to_printer take no flag
     V0203,       // 02.03.00: PrintParams_0203; bind takes no dev_model
     V020801,     // 02.08.01: PrintParams without trailing queue_plate_id
-    Current,     // 02.08.02/02.08.04: current PrintParams with queue_plate_id
+    Current,     // 02.08.02/02.08.04/02.09.01: PrintParams with queue_plate_id; shared ABI
 };
 
 struct NetworkLibraryVersion {
@@ -484,7 +484,10 @@ struct NetworkLibraryVersion {
 // host-side ABI for it. Series with no generation - 02.01.01, 02.00.02 and older - must stay out; is_supported_network_version() is the
 // gate that keeps them from loading.
 static const NetworkLibraryVersion AVAILABLE_NETWORK_VERSIONS[] = {
-    {"02.08.04", "02.08.04", nullptr, true, nullptr, NetworkAbi::Current},
+    // 02.09.01.54 (Bambu Studio 2.9.1) retains the 02.08.04.57 PrintParams layout
+    // and all existing NetworkAgent function typedefs; it only adds optional APIs.
+    {"02.09.01", "02.09.01", nullptr, true, nullptr, NetworkAbi::Current},
+    {"02.08.04", "02.08.04", nullptr, false, nullptr, NetworkAbi::Current},
     {"02.08.02", "02.08.02", nullptr, false, nullptr, NetworkAbi::Current},
     {"02.08.01", "02.08.01", nullptr, false, nullptr, NetworkAbi::V020801},
     {"02.03.00", "02.03.00", nullptr, false,
