@@ -1,0 +1,104 @@
+name: Build and publish OrcaSlicer 2.5.0 signed-host Windows x64
+
+# One-time push trigger: creating this workflow on the final branch starts the
+# installer-only build. Later edits to the source do not trigger costly builds.
+on:
+  push:
+    branches:
+      - bambu-signed-host-2.5-final
+    paths:
+      - '.github/workflows/release_signed_host_250.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: signed-host-v2.5.0-final-release
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    name: Windows x64 installer only
+    if: ${{ github.repository == 'FeromonDE/OrcaSlicer' && github.ref_name == 'bambu-signed-host-2.5-final' }}
+    uses: ./.github/workflows/build_windows_fast.yml
+    secrets: inherit
+
+  release:
+    name: Publish installer to GitHub Releases
+    needs: installer
+    if: ${{ needs.installer.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v2.5.0-signed-host
+    steps:
+      - name: Download Windows x64 installer artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: OrcaSlicer_Windows_Fast_Installer_x64
+          path: dist
+
+      - name: Publish versioned release with installer only
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(dist/OrcaSlicer*Installer*.exe)
+          if [ "${#installers[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one NSIS installer, found ${#installers[@]}"
+            ls -la dist
+            exit 1
+          fi
+          asset="dist/OrcaSlicer_2.5.0_SignedHost_Windows_x64_Installer.exe"
+          mv "${installers[0]}" "$asset"
+          test -s "$asset"
+          cat > release-notes.md <<'NOTES'
+          **OrcaSlicer 2.5.0 final — signed Bambu Studio host fork (Windows x64).**
+
+          Based on upstream OrcaSlicer v2.5.0, with the custom genuine Bambu Studio
+          host bridge, official Bambu networking plug-in support for verified 02.08.x
+          ABI generations, Storage Cache v2 and current-print thumbnail retained.
+
+          This is an **unofficial fork**. Signed-host describes the Bambu host
+          mechanism; it does not mean that this installer is code-signed by Bambu Lab.
+          Install Bambu Studio to provide the authentic signed host files.
+
+          Included asset: one Windows x64 NSIS installer only. No portable zip.
+          Bambu Networking 02.09.01 compatibility has not been verified.
+
+          Upstream release: https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.0
+          NOTES
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OrcaSlicer 2.5.0 — Bambu Signed Host (Windows x64)" \
+              --notes-file release-notes.md
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json url,assets --jq '{url: .url, assets: [.assets[].name]}'
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' | grep -Fx "$(basename "$asset")"
+
+      - name: Complete beta to final branch rename
+        shell: bash
+        run: |
+          set -euo pipefail
+          old=bambu-signed-host-2.5-beta
+          expected=4d994fd75fbbc477359938e537eb20da750d623a
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$old" --jq '.object.sha' 2>/dev/null || true)
+          if [ "$current" = "$expected" ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$old" \
+              || echo "::warning::Release published, but could not delete obsolete beta branch."
+          elif [ -n "$current" ]; then
+            echo "::warning::Beta branch moved ($current); not deleting it."
+          else
+            echo "Beta branch is already absent."
+          fi
