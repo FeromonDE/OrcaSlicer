@@ -2,6 +2,7 @@ name: Build and publish OrcaSlicer 2.5.0 signed-host Windows x64
 
 # Installer-only release build, explicitly triggered for ABI 02.09.01 support.
 # The workflow runs on edits to this file only, not on general source pushes.
+# Explicit rebuild: include the persistent Storage Cache scope fix (44f8ce91fad0).
 on:
   push:
     branches:
