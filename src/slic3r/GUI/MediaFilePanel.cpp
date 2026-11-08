@@ -317,6 +317,9 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
         m_image_grid->SetStatus(m_bmp_failed, _L("Please confirm if the printer is connected."));
     } else {
         boost::shared_ptr<PrinterFileSystem> fs(new PrinterFileSystem);
+        // Persistent Storage cache is keyed by printer; without this scope all
+        // cache reads/writes silently return Miss and every model is fetched again.
+        fs->SetCacheScope(m_machine);
         fs->Attached();
         m_image_grid->SetFileSystem(fs);
         m_image_grid->SetFileType(m_last_type, m_external ? "" : "internal");
