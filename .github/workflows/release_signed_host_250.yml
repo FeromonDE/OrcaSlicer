@@ -1,6 +1,6 @@
-name: Build and publish OrcaSlicer 2.5.1 signed-host Windows x64
+name: Build and publish OrcaSlicer 2.5.2 signed-host Windows x64
 
-# Installer-only release build for the official upstream v2.5.1 merge, with signed Bambu host.
+# Installer-only release build for the official upstream v2.5.2 merge, with signed Bambu host.
 # Runs on this workflow file or manual dispatch, not ordinary source pushes.
 # Retain the per-printer persistent Storage Cache scope fix (44f8ce91fad0).
 on:
@@ -16,7 +16,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: signed-host-v2.5.1-final-release
+  group: signed-host-v2.5.2-final-release
   cancel-in-progress: false
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: v2.5.1-signed-host
+      RELEASE_TAG: v2.5.2-signed-host
     steps:
       - name: Download Windows x64 installer artifact
         uses: actions/download-artifact@v8
@@ -55,13 +55,13 @@ jobs:
             ls -la dist
             exit 1
           fi
-          asset="dist/OrcaSlicer_2.5.1_SignedHost_Windows_x64_Installer.exe"
+          asset="dist/OrcaSlicer_2.5.2_SignedHost_Windows_x64_Installer.exe"
           mv "${installers[0]}" "$asset"
           test -s "$asset"
           cat > release-notes.md <<'NOTES'
-          **OrcaSlicer 2.5.1 final — signed Bambu Studio host fork (Windows x64).**
+          **OrcaSlicer 2.5.2 final — signed Bambu Studio host fork (Windows x64).**
 
-          Based on upstream OrcaSlicer v2.5.1, with the custom genuine Bambu Studio
+          Based on upstream OrcaSlicer v2.5.2, with the custom genuine Bambu Studio
           host bridge, Bambu networking ABI routing for 02.09.01 and earlier 02.08.x
           generations, Storage Cache v2 and current-print thumbnail retained.
 
@@ -73,7 +73,7 @@ jobs:
           Bambu Networking 02.09.01 has matching published function signatures and
           PrintParams layout. Actual loading and printing require runtime verification.
 
-          Upstream release: https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.1
+          Upstream release: https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.2
           NOTES
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
@@ -81,7 +81,7 @@ jobs:
             gh release create "$RELEASE_TAG" "$asset" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "OrcaSlicer 2.5.1 — Bambu Signed Host (Windows x64)" \
+              --title "OrcaSlicer 2.5.2 — Bambu Signed Host (Windows x64)" \
               --notes-file release-notes.md
           fi
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
