@@ -2147,6 +2147,12 @@ void PreferencesDialog::create_items()
     auto item_plugin_version = create_item_network_plugin_version(_L("Network plug-in version"), _L("Select the network plug-in version to use"));
     g_sizer->Add(item_plugin_version);
 
+    auto item_storage_ftps = create_item_checkbox(
+        _L("Use FTPS for Bambu Storage"),
+        _L("Use direct implicit FTPS on port 990 for the Device storage browser instead of the native Bambu file service on port 6000. FTPS requires direct LAN access to the printer. No automatic fallback is performed."),
+        "bambu_storage_use_ftps");
+    g_sizer->Add(item_storage_ftps);
+
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);
 

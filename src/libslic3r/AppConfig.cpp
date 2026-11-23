@@ -664,6 +664,12 @@ void AppConfig::set_defaults()
         set_bool("installed_networking", false);
     }
 
+    // Storage browser uses Bambu's native TLS :6000 protocol by default.
+    // Users may explicitly choose direct implicit FTPS :990 instead.
+    if (get("bambu_storage_use_ftps").empty()) {
+        set_bool("bambu_storage_use_ftps", false);
+    }
+
 #ifdef __linux__
     if (get("window_buttons_on_left").empty())
         set_bool("window_buttons_on_left", false);

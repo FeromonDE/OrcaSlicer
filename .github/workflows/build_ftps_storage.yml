@@ -1,0 +1,15 @@
+name: FTPS Storage Windows Installer
+
+on:
+  pull_request:
+    branches:
+      - bambu-signed-host
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  windows-installer:
+    uses: ./.github/workflows/build_windows_fast.yml
+    secrets: inherit
